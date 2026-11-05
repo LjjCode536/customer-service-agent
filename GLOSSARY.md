@@ -43,6 +43,11 @@
 - **SLA**：工单的响应/处理时限，由优先级推导。
 - **Assignment Group（指派组）**：`logistics_support / after_sales / complaint_specialist` 等客服组。
 
+## 模型接入
+
+- **ModelProvider（模型 Provider）**：统一暴露 Chat、Embedding、Rerank 三个能力的接入层；默认指向 OpenAI 兼容的硅基流动端点，可通过环境变量切换。
+- **Mock Boundary（Mock 边界）**：Mock Mode 下只有 Chat 输出被替换，Embedding、Rerank 与业务事实仍走真实链路；边界以 Provider 层为唯一实现点。
+
 ## 任务运行时
 
 - **Task（任务）**：一次后台 Workflow 执行的持久化实体，具有状态、当前节点、结果与错误。

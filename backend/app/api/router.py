@@ -6,6 +6,7 @@ from app.core.config import settings
 from app.core.security import SecurityContext,get_security_context
 from app.db.database import fetch_all,fetch_one,execute,loads,dumps
 from app.fixtures.mock_data import MOCK_CASES
+from app.llm.provider import describe_provider
 from app.rag.hybrid import retrieve
 from app.services.router import route_intent
 from app.services.tools import get_order,get_logistics,create_ticket,get_customer
@@ -16,7 +17,12 @@ router=APIRouter(prefix='/api/v1')
 def runtime():
     try: import langgraph; lg=True
     except Exception: lg=False
-    return {'mock_mode':settings.mock_mode,'deepseek_model':settings.deepseek_model,'langgraph_available':lg,'database':settings.database_path}
+    return {
+        'mock_mode':settings.mock_mode,
+        **describe_provider(),
+        'langgraph_available':lg,
+        'database':settings.database_path,
+    }
 @router.get('/mock-cases')
 def mock_cases(): return MOCK_CASES
 @router.post('/mock-cases/run')

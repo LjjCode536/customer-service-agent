@@ -1,8 +1,7 @@
 from typing import TypedDict
-from app.core.config import settings
 from app.core.security import SecurityContext
 from app.db.database import execute,fetch_all,fetch_one,dumps,loads
-from app.llm.deepseek import client
+from app.llm.provider import get_provider
 from app.rag.hybrid import retrieve
 from app.services.rules import refund_eligibility,refund_risk,approval_chain
 from app.services.tools import get_customer,get_order,get_logistics,get_refunds,create_ticket,submit_refund
@@ -38,9 +37,8 @@ def _node_answer(s):
         base='该订单已经存在退款申请，为避免重复退款，本次不会再次创建退款。'
     else:
         base='客服流程已完成。'
-    if settings.mock_mode:return {'answer':base}
     evidence={'message':s['message'],'order':s.get('order'),'logistics':s.get('logistics'),'eligibility':s.get('eligibility'),'risk':s.get('risk'),'ticket':s.get('ticket'),'refund':s.get('refund'),'knowledge':[{'title':x['title'],'content':x['content']} for x in s.get('knowledge',[])]}
-    return {'answer':client.chat_text('你是企业客服助手。只能解释系统已经完成的业务结果，不得改变退款结果、风险等级或工单优先级。',f'请用简洁自然的中文回复用户：{dumps(evidence)}')}
+    return {'answer':get_provider().chat('你是企业客服助手。只能解释系统已经完成的业务结果，不得改变退款结果、风险等级或工单优先级。',f'请用简洁自然的中文回复用户：{dumps(evidence)}',mock_response=base)}
 
 NODES={'load_customer':_node_customer,'load_order':_node_order,'load_logistics':_node_logistics,'retrieve_policy':_node_knowledge,'load_refunds':_node_refunds,'check_eligibility':_node_eligibility,'risk_check':_node_risk,'create_ticket':_node_ticket,'answer':_node_answer}
 def run_node(name,s):

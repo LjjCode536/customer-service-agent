@@ -1,6 +1,5 @@
 import re
-from app.core.config import settings
-from app.llm.deepseek import client
+from app.llm.provider import get_provider
 
 def extract_order_id(text):
     m=re.search(r'\bO\d{5}\b', text.upper()); return m.group(0) if m else None
@@ -13,9 +12,9 @@ def route_intent(text: str) -> dict:
     elif order_id and any(x in t for x in ['订单','状态','查一下']): intent='order_query'
     elif any(x in t for x in ['发票','保修','售后政策','怎么开']): intent='faq'
     else: intent='chat'
-    if not settings.mock_mode and intent=='chat':
+    if intent=='chat':
         try:
-            ans=client.chat_text('只返回 faq/order_query/logistics_query/refund/complaint/chat 之一。','用户问题：'+text)
+            ans=get_provider().chat('只返回 faq/order_query/logistics_query/refund/complaint/chat 之一。','用户问题：'+text)
             for name in ['faq','order_query','logistics_query','refund','complaint','chat']:
                 if name in ans: intent=name; break
         except Exception: pass

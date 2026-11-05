@@ -48,6 +48,34 @@ flowchart LR
 
 详细决策见 `docs/adr/`，术语见 [GLOSSARY.md](GLOSSARY.md)。
 
+## 模型接入
+
+Chat、Embedding、Rerank 统一通过 `ModelProvider`（`backend/app/llm/provider.py`）访问，默认使用 OpenAI 兼容的硅基流动端点：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `MOCK_MODE` | `true` | 只替换 Chat 输出；Embedding 与 Rerank 仍调用真实 Provider |
+| `MODEL_PROVIDER` | `siliconflow` | Provider 标签，仅用于展示与日志 |
+| `MODEL_API_KEY` | 空 | 真实 Provider 必需；Chat / Embedding / Rerank 共用 |
+| `MODEL_BASE_URL` | `https://api.siliconflow.cn/v1` | OpenAI 兼容 base URL |
+| `MODEL_CHAT_MODEL` | `Qwen/Qwen3-8B` | Chat 模型 |
+| `MODEL_EMBEDDING_MODEL` | `BAAI/bge-m3` | Embedding 模型 |
+| `MODEL_EMBEDDING_DIMENSIONS` | `1024` | Embedding 维度；返回向量维度不一致时显式报错 |
+| `MODEL_RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | Rerank 模型 |
+| `MODEL_TIMEOUT_SECONDS` | `60` | Provider 请求超时 |
+
+切换到其他 OpenAI 兼容服务只需改环境变量。Chat 可以切到 DeepSeek：
+
+```dotenv
+MODEL_PROVIDER=deepseek
+MODEL_BASE_URL=https://api.deepseek.com/v1
+MODEL_CHAT_MODEL=deepseek-chat
+```
+
+但 DeepSeek 本身不提供 `/embeddings` 与 `/rerank`，因此 Embedding / Rerank 必须继续指向支持这两个端点的兼容服务（当前配置三者共用一个 base URL）。只切换 Chat 时，请在代码或部署侧保留原 Embedding / Rerank Provider。
+
+`GET /api/v1/runtime` 返回当前 Provider、三个模型名、Mock 边界、API key 是否配置、LangGraph 可用性与数据库路径。`mock_boundary` 表示是否模拟调用（`chat: mock`），不代表凭据一定可用；`api_key_configured=false` 时真实 Embedding / Rerank 会显式报错而不是返回伪造向量。测试通过 `set_provider()` 注入 fake Provider，不访问网络、不读取真实 key。
+
 ## Demo Cases
 
 | Case | 输入 | 预期 |
@@ -64,6 +92,7 @@ flowchart LR
 ### 本地（Mock）
 
 ```bash
+cp .env.example .env        # 按需填写 MODEL_API_KEY
 cd backend
 python -m venv .venv
 # Windows: .venv\Scripts\activate
@@ -101,6 +130,7 @@ backend/
     api/          # HTTP 接口、SSE
     core/         # 配置、Security Context
     db/           # 数据库与 schema
+    llm/          # ModelProvider：Chat / Embedding / Rerank
     rag/          # 混合检索与精排
     services/     # Router、规则、Tool、Task
     workflow/     # LangGraph 编排

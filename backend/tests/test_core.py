@@ -1,8 +1,3 @@
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import os,tempfile
-fd,path=tempfile.mkstemp(suffix='.db');os.close(fd);os.environ['DATABASE_PATH']=path
 from app.services.router import route_intent
 from app.services.rules import refund_eligibility,refund_risk
 

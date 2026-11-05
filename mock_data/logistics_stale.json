@@ -1,0 +1,1 @@
+{"case_key":"logistics_stale","user_id":"U1001","order_id":"O10001","message":"订单 O10001 物流两天没更新，到底怎么回事？","expected":{"route":"direct_tool","last_update_hours":38,"ticket_category":"logistics_abnormal","priority":"P2"}}

@@ -1,0 +1,23 @@
+services:
+  api:
+    build: ./backend
+    working_dir: /app
+    env_file: .env
+    volumes:
+      - service_data:/app/data
+    command: sh -c "python -m app.scripts_seed && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports: ["8000:8000"]
+  worker:
+    build: ./backend
+    working_dir: /app
+    env_file: .env
+    volumes:
+      - service_data:/app/data
+    depends_on: [api]
+    command: sh -c "sleep 2 && python -m app.worker"
+  frontend:
+    build: ./frontend
+    depends_on: [api]
+    ports: ["3000:80"]
+volumes:
+  service_data:

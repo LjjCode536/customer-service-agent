@@ -1,0 +1,1 @@
+{"case_key":"high_refund","user_id":"U1003","vip_level":"vip","order_id":"O10003","amount":12999,"expected":{"risk":"high","approval_chain":["refund_specialist","service_manager"],"after_approval":"refund_submit"}}

@@ -1,0 +1,1 @@
+{"case_key":"low_refund","user_id":"U1002","order_id":"O10002","amount":399,"payment_status":"paid","shipment_status":"not_shipped","expected":{"eligible":true,"risk":"low","action":"auto_refund"}}

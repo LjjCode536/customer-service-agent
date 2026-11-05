@@ -1,0 +1,1 @@
+{"case_key":"duplicate_refund","user_id":"U1004","order_id":"O10004","historical_refund":true,"expected":{"eligible":false,"reason":"DUPLICATE_REFUND_REQUEST","ticket_category":"refund_duplicate"}}

@@ -1,0 +1,1 @@
+{"case_key":"vip_complaint","user_id":"U1005","vip_level":"vip","order_id":"O10005","recent_ticket_count":3,"complaint_count_30d":2,"expected":{"intent":"complaint","ticket_priority":"P1","assigned_group":"complaint_specialist"}}

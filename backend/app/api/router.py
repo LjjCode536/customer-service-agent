@@ -38,6 +38,7 @@ from app.services.bad_cases import (
     update_bad_case,
 )
 from app.services.dispatch import OrderIdRequired, dispatch_message
+from app.services.metrics import sla_risk
 from app.services.tasking import get_task, list_events
 
 router = APIRouter(prefix='/api/v1')
@@ -226,7 +227,6 @@ def traces(limit: int = 300, trace_id: str | None = None):
 def dashboard():
     with session_scope() as s:
         tickets_total = s.scalar(select(func.count(Ticket.id))) or 0
-        open_tickets = s.scalar(select(func.count(Ticket.id)).where(Ticket.status == 'open')) or 0
         refund_total = float(s.scalar(select(func.coalesce(func.sum(RefundRequest.amount), 0))) or 0)
         waiting_approval = s.scalar(select(func.count(Task.id)).where(Task.status == 'waiting_approval')) or 0
         ticket_by_priority = [
@@ -237,6 +237,10 @@ def dashboard():
             {'category': category, 'count': count}
             for category, count in s.execute(select(Ticket.category, func.count()).group_by(Ticket.category)).all()
         ]
+        open_ticket_rows = [
+            row.to_dict() for row in s.scalars(select(Ticket).where(Ticket.status == 'open'))
+        ]
+        open_tickets = len(open_ticket_rows)
     return {
         'tickets_total': tickets_total,
         'open_tickets': open_tickets,
@@ -244,6 +248,7 @@ def dashboard():
         'waiting_approval': waiting_approval,
         'ticket_by_priority': ticket_by_priority,
         'ticket_by_category': ticket_by_category,
+        'sla_risk': sla_risk(open_ticket_rows),
     }
 
 

@@ -178,7 +178,23 @@ npm run dev
 
 打开 `http://localhost:5173`，在 Agent Lab 选择 Mock Case 运行。
 
-### Docker Compose
+## 前端 Console
+
+前端数据层使用 TanStack Query 统一请求、缓存与轮询；SSE 通过 `@microsoft/fetch-event-source` 携带 Security Context 头订阅任务事件；Zustand 管理用户、租户、角色与 Mock/Real 上下文。顶栏可切换 Security Context，`/chat` 等读取上下文的接口会立即使用新身份；Dashboard、Trace 等全局运营视图是演示数据，不按租户过滤。
+
+三个重点页面：
+
+- **Dashboard**：工单优先级、退款金额、待审批、SLA 风险（超时 / 临近 / 正常），每 10 秒轮询刷新。
+- **Agent Lab**：选择 Mock Case 或输入自定义消息，运行后实时展示 Workflow 节点时间线、任务状态与结果，并可一键跳转 Trace。
+- **Trace Explorer**：按 `trace_id` 查看节点耗时柱状图、执行顺序，以及每个节点的输入、输出与错误。
+
+![Dashboard](docs/screenshots/dashboard.png)
+
+![Agent Lab](docs/screenshots/agent-lab.png)
+
+![Trace Explorer](docs/screenshots/trace-explorer.png)
+
+## Docker Compose
 
 ```bash
 docker compose up --build
@@ -237,7 +253,7 @@ approval / idempotency`。评测在临时 SQLite 沙箱和 `OfflineProvider` 中
 - [ ] 阶段 2：LangGraph 节点重构、interrupt + checkpointer、原子幂等
 - [x] 阶段 3：只读 Agent Loop + 预算终止
 - [x] 阶段 4：Golden Dataset 端到端评测、Bad Case 闭环
-- [ ] 阶段 5：前端 3 个重点页面
+- [x] 阶段 5：前端 3 个重点页面
 - [ ] 阶段 6：测试补齐
 - [ ] 阶段 7：公网 Demo 与 CI（暂缓）
 

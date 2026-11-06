@@ -1,35 +1,69 @@
-import {useEffect,useState} from 'react';
-import {Card,Space,Table,Tag,Typography} from 'antd';
-import {api} from '../api/client';
+import { Button, Card, Space, Table, Tag, Typography } from 'antd'
+import { ReloadOutlined } from '@ant-design/icons'
+import { useEvaluation } from '../api/queries'
+import type { EvaluationCase } from '../api/types'
 
-type Check={field:string;expected:any;actual:any;passed:boolean};
-type Case={id:string;name:string;category:string;passed:boolean;error?:string;trace_id?:string;checks:Check[];expected:any;actual:any};
-type Report={summary?:{total:number;passed:number;failed:number;pass_rate:number};cases:Case[]};
+export default function Evaluation() {
+  const evaluation = useEvaluation()
+  const report = evaluation.data
+  const failed = (row: EvaluationCase) => row.checks.filter((check) => !check.passed)
 
-const empty:Report={cases:[]};
-
-export default function Evaluation(){
-  const[report,setReport]=useState<Report>(empty);
-  useEffect(()=>{api.get('/evaluation').then(r=>setReport(r.data))},[]);
-  const failed=(c:Case)=>c.checks.filter(x=>!x.passed);
-  return <>
-    <Typography.Title level={3}>Golden Dataset Evaluation</Typography.Title>
-    <Card style={{marginBottom:16}}>
-      <Space>
-        {report.summary && <Tag color={report.summary.failed?'red':'green'}>
-          PASS {report.summary.passed}/{report.summary.total}
-        </Tag>}
-        <Typography.Text type="secondary">每个用例执行完整 Task / Worker / Workflow 链路，使用离线 Provider 与隔离数据库。</Typography.Text>
+  return (
+    <>
+      <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }}>
+        <Typography.Title level={3} style={{ margin: 0 }}>
+          Golden Dataset Evaluation
+        </Typography.Title>
+        <Button icon={<ReloadOutlined />} onClick={() => void evaluation.refetch()} loading={evaluation.isFetching}>
+          重新评测
+        </Button>
       </Space>
-    </Card>
-    <Table rowKey="id" dataSource={report.cases} pagination={false}
-      expandable={{expandedRowRender:(r:Case)=><pre style={{whiteSpace:'pre-wrap'}}>{JSON.stringify({expected:r.expected,actual:r.actual,error:r.error},null,2)}</pre>}}
-      columns={[
-        {title:'Case',dataIndex:'name'},
-        {title:'Category',dataIndex:'category'},
-        {title:'结果',dataIndex:'passed',render:(x:boolean)=><Tag color={x?'green':'red'}>{x?'PASS':'FAIL'}</Tag>},
-        {title:'失败断言',render:(_:unknown,r:Case)=>failed(r).length?failed(r).map(c=><Tag color="red" key={c.field}>{c.field}</Tag>):'-'},
-        {title:'Trace',dataIndex:'trace_id',render:(x?:string)=>x||'-'},
-      ]}/>
-  </>;
+      <Card style={{ marginBottom: 16 }} loading={evaluation.isLoading}>
+        <Space wrap>
+          {report?.summary ? (
+            <Tag color={report.summary.failed ? 'red' : 'green'}>
+              PASS {report.summary.passed}/{report.summary.total}
+            </Tag>
+          ) : null}
+          <Typography.Text type="secondary">
+            每个用例执行完整 Task / Worker / Workflow 链路，使用离线 Provider 与隔离数据库。
+          </Typography.Text>
+        </Space>
+      </Card>
+      <Table
+        rowKey="id"
+        loading={evaluation.isLoading}
+        dataSource={report?.cases ?? []}
+        pagination={false}
+        expandable={{
+          expandedRowRender: (row: EvaluationCase) => (
+            <pre style={{ whiteSpace: 'pre-wrap' }}>
+              {JSON.stringify({ expected: row.expected, actual: row.actual, error: row.error }, null, 2)}
+            </pre>
+          ),
+        }}
+        columns={[
+          { title: 'Case', dataIndex: 'name' },
+          { title: 'Category', dataIndex: 'category' },
+          {
+            title: '结果',
+            dataIndex: 'passed',
+            render: (value: boolean) => <Tag color={value ? 'green' : 'red'}>{value ? 'PASS' : 'FAIL'}</Tag>,
+          },
+          {
+            title: '失败断言',
+            render: (_: unknown, row: EvaluationCase) =>
+              failed(row).length
+                ? failed(row).map((check) => (
+                    <Tag color="red" key={check.field}>
+                      {check.field}
+                    </Tag>
+                  ))
+                : '-',
+          },
+          { title: 'Trace', dataIndex: 'trace_id', render: (value?: string) => value || '-' },
+        ]}
+      />
+    </>
+  )
 }

@@ -68,3 +68,7 @@
 - **Offline Provider**：Golden Dataset 使用的确定性离线 ModelProvider，Chat、Embedding、Rerank 都不访问网络。
 - **Bad Case（坏例）**：线上或评测中发现的失败样本，通过 `trace_id` 关联 Trace，记录错误类型、根因、期望结果与修复状态。
 - **Mock Mode**：默认演示模式，只模拟文本生成；检索与业务事实仍走真实链路。
+
+## 运营指标
+
+- **SLA Risk（SLA 风险）**：Open Ticket 相对 sla_due_at 的运营状态，分为 reached（已超时）、t_risk（临近超时，默认 60 分钟窗口）与 on_track（正常）。

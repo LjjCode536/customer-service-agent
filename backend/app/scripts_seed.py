@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+
 from sqlalchemy import delete
 
 from app.db.database import dumps, session_scope
@@ -122,6 +124,36 @@ def seed(verbose: bool = True):
         )
         session.add_all(
             [
+                Ticket(
+                    id='T-DEMO-SLA-BREACHED',
+                    tenant_id='TENANT-DEMO',
+                    user_id='U1001',
+                    order_id=None,
+                    category='after_sales',
+                    priority='P1',
+                    status='open',
+                    description='演示数据：已超过 SLA 的待处理售后工单',
+                    assigned_group='after_sales',
+                    sla_due_at=(datetime.now() - timedelta(minutes=15)).isoformat(
+                        timespec='seconds'
+                    ),
+                    source='human',
+                ),
+                Ticket(
+                    id='T-DEMO-SLA-RISK',
+                    tenant_id='TENANT-DEMO',
+                    user_id='U1002',
+                    order_id=None,
+                    category='payment_issue',
+                    priority='P2',
+                    status='open',
+                    description='演示数据：临近 SLA 的待处理支付工单',
+                    assigned_group='after_sales',
+                    sla_due_at=(datetime.now() + timedelta(minutes=20)).isoformat(
+                        timespec='seconds'
+                    ),
+                    source='human',
+                ),
                 Ticket(
                     id='T-HISTORY-U1005-1',
                     tenant_id='TENANT-DEMO',

@@ -219,6 +219,16 @@ mock_data/        # 演示输入
 - Eligibility / Risk
 - Ticket Route / Priority / SLA
 - Human Review 顺序与恢复
+- Refund 幂等与重复申请拦截
+
+`GET /api/v1/evaluation` 会为 5 类核心场景 + FAQ 各跑一遍完整的
+Router → Task → Worker → Workflow 链路，断言 `mode / intent / ticket / refund /
+approval / idempotency`。评测在临时 SQLite 沙箱和 `OfflineProvider` 中运行，
+无网络、无真实 key、不读写业务库，也不等待 SSE。
+
+失败样本可通过 `POST /api/v1/bad-cases` 登记；`GET /api/v1/bad-cases`（支持
+`trace_id` 过滤）、`GET /api/v1/bad-cases/{id}` 查询，`PATCH /api/v1/bad-cases/{id}`
+回填根因、期望结果和 `fixed` 状态。
 
 ## Roadmap
 
@@ -226,7 +236,7 @@ mock_data/        # 演示输入
 - [ ] 阶段 1：SQLAlchemy、SiliconFlow Provider、真 BM25 / Embedding / Rerank、SSE / 日志
 - [ ] 阶段 2：LangGraph 节点重构、interrupt + checkpointer、原子幂等
 - [x] 阶段 3：只读 Agent Loop + 预算终止
-- [ ] 阶段 4：Golden Dataset 端到端评测、Bad Case 闭环
+- [x] 阶段 4：Golden Dataset 端到端评测、Bad Case 闭环
 - [ ] 阶段 5：前端 3 个重点页面
 - [ ] 阶段 6：测试补齐
 - [ ] 阶段 7：公网 Demo 与 CI（暂缓）

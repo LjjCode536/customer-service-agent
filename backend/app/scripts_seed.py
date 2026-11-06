@@ -20,7 +20,7 @@ from app.fixtures.mock_data import CUSTOMERS, KNOWLEDGE, LOGISTICS, ORDERS
 from app.rag.hybrid import cache_knowledge_embeddings
 
 
-def seed():
+def seed(verbose: bool = True):
     init_schema()
     with session_scope() as session:
         # Child tables first so the logistics -> orders foreign key is never violated.
@@ -150,7 +150,8 @@ def seed():
                 ),
             ]
         )
-    print('seed complete')
+    if verbose:
+        print('seed complete')
 
 
 if __name__ == '__main__':

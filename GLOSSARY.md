@@ -8,6 +8,7 @@
 - **Intent Router（意图路由）**：把用户请求分流到 `faq`、`order_query`、`logistics_query`、`refund`、`complaint`、`chat` 的确定性组件。它不是 Agent Loop。
 - **Direct RAG**：FAQ、退款政策、物流 SOP 等知识问题直接检索并回答，不创建 Task。
 - **Direct Tool**：订单、物流等确定性实时事实直接调用业务 Tool，不进入 LLM Agent Loop。
+- **Dispatch（统一入口）**：把一条用户消息分流到 Direct RAG、Direct Tool、Agent Loop 或 Workflow 的单一入口；HTTP API 与评测共用它。
 - **Workflow**：退款、投诉等多步骤、有分支、可能有副作用的流程，创建后台 Task 后由 Worker 驱动。
 
 ## 检索
@@ -62,6 +63,8 @@
 - **Agent Loop**：只读的受预算约束工具循环；只在意图不明确或多步查询时启用。
 - **Budget（预算）**：Agent Loop 的 `max_steps / max_tool_calls / max_tokens` 上限，耗尽即终止并降级。
 - **Fallback**：LangGraph 不可用时的确定性降级路径，保持相同节点语义，仅用于测试与演示。
-- **Golden Dataset（黄金数据集）**：覆盖物流异常、低风险退款、高额退款、重复退款、VIP 投诉的端到端评测用例。
-- **Bad Case（坏例）**：线上或评测中发现的失败样本，记录根因、期望结果与修复状态。
+- **Golden Dataset（黄金数据集）**：覆盖物流异常、低风险退款、高额退款、重复退款、VIP 投诉与 FAQ 的端到端评测用例。
+- **Evaluation Sandbox（评测沙箱）**：每次评测创建的临时 SQLite 数据库与临时 checkpoint，评测不读写业务库。
+- **Offline Provider**：Golden Dataset 使用的确定性离线 ModelProvider，Chat、Embedding、Rerank 都不访问网络。
+- **Bad Case（坏例）**：线上或评测中发现的失败样本，通过 `trace_id` 关联 Trace，记录错误类型、根因、期望结果与修复状态。
 - **Mock Mode**：默认演示模式，只模拟文本生成；检索与业务事实仍走真实链路。

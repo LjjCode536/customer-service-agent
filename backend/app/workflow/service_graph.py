@@ -1,14 +1,22 @@
-from typing import TypedDict
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Iterator, TypedDict
 
 from sqlalchemy import func, select
 
 from app.core.config import settings
+from app.core.context import scoped
 from app.core.security import SecurityContext
 from app.db.database import dumps, session_scope, use_session
 from app.db.models import ApprovalRecord
 from app.llm.provider import get_provider
 from app.rag.hybrid import retrieve
-from app.services.rules import approval_chain, complaint_assessment, refund_eligibility, refund_risk
+from app.services.rules import (
+    approval_chain,
+    complaint_assessment,
+    refund_eligibility,
+    refund_risk,
+)
 from app.services.tasking import (
     emit_event,
     get_task,
@@ -18,7 +26,14 @@ from app.services.tasking import (
     trace_step,
     update_task,
 )
-from app.services.tools import create_ticket, get_customer, get_logistics, get_order, get_refunds, submit_refund
+from app.services.tools import (
+    create_ticket,
+    get_customer,
+    get_logistics,
+    get_order,
+    get_refunds,
+    submit_refund,
+)
 from app.workflow.checkpointer import create_checkpointer
 
 HIGH_RISK_REVIEW_MESSAGE = '该退款金额较高，已进入人工审核，审核通过后系统会继续原退款流程。'
@@ -275,8 +290,23 @@ def _build_graph():
 
 GRAPH = _build_graph()
 
+# Evaluation compiles its own graph against an isolated checkpoint store.
+_NO_GRAPH_OVERRIDE = object()
+_graph_override: ContextVar[Any] = ContextVar(
+    'workflow_graph_override', default=_NO_GRAPH_OVERRIDE
+)
+
+
+@contextmanager
+def use_graph(graph: Any) -> Iterator[Any]:
+    with scoped(_graph_override, graph):
+        yield graph
+
 
 def _graph_for_execution():
+    override = _graph_override.get()
+    if override is not _NO_GRAPH_OVERRIDE:
+        return override
     if GRAPH is not None:
         return GRAPH
     if settings.workflow_engine == 'fallback':

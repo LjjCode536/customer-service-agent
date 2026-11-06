@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from threading import Lock
-from typing import Protocol, Sequence
+from typing import Iterator, Protocol, Sequence
 
 import httpx
 
 from app.core.config import Settings, settings
+from app.core.context import scoped
 
 MOCK_CHAT_REPLY = 'Mock 模式：仅模拟文本生成，真实检索与业务结果仍由系统提供。'
 
@@ -250,14 +253,28 @@ def create_provider(config: Settings | None = None) -> ModelProvider:
 
 _provider: ModelProvider | None = None
 _provider_lock = Lock()
+# Evaluation runs an offline provider without touching the process-wide live provider.
+_provider_override: ContextVar[ModelProvider | None] = ContextVar(
+    'provider_override', default=None
+)
 
 
 def get_provider() -> ModelProvider:
+    override = _provider_override.get()
+    if override is not None:
+        return override
     global _provider
     with _provider_lock:
         if _provider is None:
             _provider = create_provider()
         return _provider
+
+
+@contextmanager
+def use_provider(provider: ModelProvider) -> Iterator[ModelProvider]:
+    """Scope a provider to the current execution context (thread/async task)."""
+    with scoped(_provider_override, provider):
+        yield provider
 
 
 def set_provider(provider: ModelProvider) -> None:

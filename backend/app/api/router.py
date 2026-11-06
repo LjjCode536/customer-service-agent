@@ -1,26 +1,44 @@
 import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
 from sse_starlette.sse import EventSourceResponse
 
-from app.api.schemas import ApprovalDecision, BadCaseCreate, ChatRequest, MockCaseRequest
+from app.api.schemas import (
+    ApprovalDecision,
+    BadCaseCreate,
+    BadCaseUpdate,
+    ChatRequest,
+    MockCaseRequest,
+)
 from app.core.config import settings
 from app.core.security import SecurityContext, get_security_context
-from app.db.database import dumps, engine, loads, session_scope, utcnow
-from app.db.models import ApprovalRecord, BadCase, Knowledge, RefundRequest, Task, Ticket, TraceStep
+from app.db.database import dumps, engine, loads, session_scope
+from app.db.models import (
+    ApprovalRecord,
+    Knowledge,
+    RefundRequest,
+    Task,
+    Ticket,
+    TraceStep,
+)
 from app.fixtures.mock_data import MOCK_CASES
 from app.llm.provider import ProviderError, describe_provider
-from app.rag.hybrid import retrieve
-from app.services.agent_loop import (
-    READ_ONLY_TOOL_NAMES,
-    run_agent_loop,
-    should_use_agent_loop,
+from app.services.agent_loop import READ_ONLY_TOOL_NAMES
+from app.services.approvals import (
+    ApprovalNotFound,
+    ApprovalSequenceConflict,
+    decide_approval,
 )
-from app.services.router import route_intent
-from app.services.tasking import create_task, get_task, list_events, record_audit
-from app.services.tools import create_ticket, get_customer, get_logistics, get_order
+from app.services.bad_cases import (
+    create_bad_case,
+    get_bad_case,
+    list_bad_cases,
+    update_bad_case,
+)
+from app.services.dispatch import OrderIdRequired, dispatch_message
+from app.services.tasking import get_task, list_events
 
 router = APIRouter(prefix='/api/v1')
 
@@ -69,50 +87,16 @@ def chat(body: ChatRequest, ctx: SecurityContext = Depends(get_security_context)
 
 
 def _chat(body, ctx):
-    r = route_intent(body.message)
-    if should_use_agent_loop(r, body.message):
-        try:
-            return run_agent_loop(body.message, ctx, intent=r['intent'])
-        except PermissionError as e:
-            raise HTTPException(403, str(e))
-        except ValueError as e:
-            raise HTTPException(404, str(e))
-    intent = r['intent']; oid = r.get('order_id')
-    if intent == 'faq':
-        try:
-            docs = retrieve(body.message, top_n=3)
-        except ProviderError as exc:
-            raise HTTPException(503, str(exc)) from exc
-        answer = docs[0]['content'] if docs else '当前知识库没有足够依据。'
-        return {'mode': 'direct_rag', 'intent': intent, 'answer': answer, 'citations': [{'title': x['title'], 'version': x['version']} for x in docs], 'evidence': docs}
-    if not oid: raise HTTPException(400, '请提供订单号，例如 O10001')
     try:
-        if intent == 'order_query': return {'mode': 'direct_tool', 'intent': intent, 'order': get_order(oid, ctx)}
-        if intent == 'logistics_query':
-            log = get_logistics(oid, ctx)
-            if not log: return {'mode': 'direct_tool', 'intent': intent, 'answer': '该订单暂无物流信息。'}
-            ticket = None
-            if int(log['last_update_hours']) >= 24:
-                ticket = create_ticket(ctx, oid, 'logistics_abnormal', body.message, stale_hours=int(log['last_update_hours']))
-                record_audit(
-                    None,
-                    ctx.user_id,
-                    'ticket_created',
-                    {
-                        'ticket_id': ticket['id'],
-                        'order_id': ticket.get('order_id'),
-                        'category': ticket['category'],
-                        'priority': ticket['priority'],
-                        'assigned_group': ticket['assigned_group'],
-                        'source': 'direct_tool',
-                    },
-                )
-            return {'mode': 'direct_tool', 'intent': intent, 'logistics': log, 'ticket': ticket, 'answer': f"当前物流状态 {log['status']}，最后节点：{log['last_event']}。" + (f" 已创建工单 {ticket['id']}。" if ticket else '')}
-    except PermissionError as e:
-        raise HTTPException(403, str(e))
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-    return {'mode': 'workflow', 'intent': intent, **create_task(ctx, intent, {'message': body.message, 'order_id': oid, 'role': ctx.role})}
+        return dispatch_message(body.message, ctx)
+    except OrderIdRequired as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ProviderError as exc:
+        raise HTTPException(503, str(exc)) from exc
 
 
 @router.get('/tasks/{task_id}')
@@ -197,68 +181,19 @@ def approvals():
 
 @router.post('/approvals/{approval_id}/decision')
 def approve(approval_id, body: ApprovalDecision):
-    if body.status not in {'approved', 'rejected'}: raise HTTPException(400, 'status must approved/rejected')
-    with session_scope() as s:
-        a = s.get(ApprovalRecord, approval_id)
-        if not a: raise HTTPException(404, 'approval not found')
-        prior = s.scalars(
-            select(ApprovalRecord)
-            .where(
-                ApprovalRecord.task_id == a.task_id,
-                ApprovalRecord.sequence_no < a.sequence_no,
-                ApprovalRecord.status == 'pending',
-            )
-            .order_by(ApprovalRecord.sequence_no)
-            .limit(1)
-        ).first()
-        if prior: raise HTTPException(409, f"请先完成前置审批：{prior.approver_role}")
-
-        task_row = s.get(Task, a.task_id)
-        a.status = body.status
-        a.approver_user_id = body.approver_user_id
-        a.comment = body.comment
-        a.updated_at = utcnow()
-        cancelled = 0
-        if body.status == 'rejected':
-            result = s.execute(
-                update(ApprovalRecord)
-                .where(
-                    ApprovalRecord.task_id == a.task_id,
-                    ApprovalRecord.status == 'pending',
-                    ApprovalRecord.id != approval_id,
-                )
-                .values(status='cancelled', updated_at=func.current_timestamp())
-            )
-            cancelled = result.rowcount or 0
-        s.flush()
-        allrows = [
-            row.to_dict()
-            for row in s.scalars(
-                select(ApprovalRecord).where(ApprovalRecord.task_id == a.task_id)
-            )
-        ]
-        record_audit(
-            task_row.trace_id if task_row else None,
-            body.approver_user_id,
-            f'approval_{body.status}',
-            {
-                'approval_id': a.id,
-                'task_id': a.task_id,
-                'order_id': a.order_id,
-                'approver_role': a.approver_role,
-                'sequence_no': a.sequence_no,
-                'comment': body.comment,
-                'cancelled_approvals': cancelled,
-            },
-            session=s,
+    try:
+        return decide_approval(
+            approval_id,
+            body.status,
+            approver_user_id=body.approver_user_id,
+            comment=body.comment,
         )
-        if any(r['status'] == 'rejected' for r in allrows) or not any(r['status'] == 'pending' for r in allrows):
-            if task_row:
-                task_row.status = 'resume_pending'
-                task_row.current_step = 'approval_resume'
-                task_row.updated_at = utcnow()
-                s.flush()
-        return {'approval': a.to_dict(), 'all': allrows}
+    except ApprovalNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ApprovalSequenceConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.get('/knowledge')
@@ -315,29 +250,37 @@ def dashboard():
 @router.get('/evaluation')
 def evaluation():
     from app.eval.run_eval import evaluate
-    return {'cases': evaluate()}
+
+    return evaluate()
 
 
 @router.get('/bad-cases')
-def bad_cases():
-    with session_scope() as s:
-        rows = [row.to_dict() for row in s.scalars(select(BadCase).order_by(BadCase.id.desc()))]
-    for r in rows:
-        r['expected_result'] = loads(r.pop('expected_result_json', '{}'), {})
-        r['fixed'] = bool(r['fixed'])
-    return rows
+def bad_cases(trace_id: str | None = None):
+    return list_bad_cases(trace_id=trace_id)
+
+
+@router.get('/bad-cases/{bad_case_id}')
+def bad_case(bad_case_id: int):
+    row = get_bad_case(bad_case_id)
+    if not row:
+        raise HTTPException(404, 'bad case not found')
+    return row
 
 
 @router.post('/bad-cases')
-def bad(body: BadCaseCreate):
-    with session_scope() as s:
-        s.add(
-            BadCase(
-                trace_id=body.trace_id,
-                query=body.query,
-                error_type=body.error_type,
-                root_cause=body.root_cause,
-                expected_result_json=dumps(body.expected_result),
-            )
-        )
-    return {'status': 'created'}
+def create_bad(body: BadCaseCreate):
+    return create_bad_case(
+        trace_id=body.trace_id,
+        query=body.query,
+        error_type=body.error_type,
+        root_cause=body.root_cause,
+        expected_result=body.expected_result,
+    )
+
+
+@router.patch('/bad-cases/{bad_case_id}')
+def patch_bad(bad_case_id: int, body: BadCaseUpdate):
+    row = update_bad_case(bad_case_id, body.model_dump(exclude_unset=True))
+    if not row:
+        raise HTTPException(404, 'bad case not found')
+    return row

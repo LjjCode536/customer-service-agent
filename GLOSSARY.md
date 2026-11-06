@@ -42,6 +42,7 @@
 - **Priority（优先级）**：`P0–P3`，由问题类型、VIP、投诉、物流异常时长等确定性规则计算。
 - **SLA**：工单的响应/处理时限，由优先级推导。
 - **Assignment Group（指派组）**：`logistics_support / after_sales / complaint_specialist` 等客服组。
+- **Complaint Path（投诉路径）**：投诉请求在 Workflow 中的独立分支：加载客户/订单/物流、检索物流 SOP、评估 VIP 与物流异常信号、创建投诉工单并回答；不进入退款节点。
 
 ## 模型接入
 

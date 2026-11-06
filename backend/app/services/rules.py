@@ -36,6 +36,24 @@ def ticket_priority(category, vip_level, complaint=False, stale_hours=0):
     return 'P3'
 
 
+def complaint_assessment(customer, logistics):
+    """Collect the deterministic signals that drive complaint priority and assignment."""
+    vip_level = customer.get('vip_level') or 'normal'
+    stale_hours = int((logistics or {}).get('last_update_hours') or 0)
+    reasons = ['COMPLAINT']
+    if vip_level == 'vip':
+        reasons.append('VIP')
+    if stale_hours >= 24:
+        reasons.append('LOGISTICS_STALE')
+    return {
+        'vip_level': vip_level,
+        'stale_hours': stale_hours,
+        'priority': ticket_priority('complaint', vip_level, complaint=True, stale_hours=stale_hours),
+        'assigned_group': ticket_assignment('complaint'),
+        'reasons': reasons,
+    }
+
+
 def sla_due(priority, now=None):
     base = now or datetime.now()
     return (base + timedelta(minutes=SLA_MINUTES[priority])).isoformat(timespec='seconds')

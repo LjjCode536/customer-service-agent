@@ -97,9 +97,14 @@ def create_ticket(
     description,
     complaint=False,
     stale_hours=0,
+    priority: str | None = None,
     session: Session | None = None,
 ):
-    """Side-effect tool: never blindly retried; returns a visible open ticket when one exists."""
+    """Side-effect tool: never blindly retried; returns a visible open ticket when one exists.
+
+    `priority` lets a deterministic workflow assessment supply the already-computed value so
+    Priority has one handwritten rule set rather than a shadow copy.
+    """
     with use_session(session) as s:
         if order_id is not None:
             # Never trust a model-supplied order id; ownership/tenant come from Security Context.
@@ -119,7 +124,7 @@ def create_ticket(
             return existing.to_dict()
 
         customer = _get_customer_once(s, ctx)
-        p = ticket_priority(category, customer['vip_level'], complaint, stale_hours)
+        p = priority or ticket_priority(category, customer['vip_level'], complaint, stale_hours)
         tid = new_id('ticket')
         row = Ticket(
             id=tid,

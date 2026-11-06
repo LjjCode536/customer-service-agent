@@ -8,7 +8,7 @@ from app.db.database import dumps, session_scope, use_session
 from app.db.models import ApprovalRecord, AuditLog, TraceStep
 from app.llm.provider import get_provider
 from app.rag.hybrid import retrieve
-from app.services.rules import approval_chain, refund_eligibility, refund_risk
+from app.services.rules import approval_chain, complaint_assessment, refund_eligibility, refund_risk
 from app.services.tasking import emit_event, get_task, new_id, trace_step, update_task
 from app.services.tools import create_ticket, get_customer, get_logistics, get_order, get_refunds, submit_refund
 from app.workflow.checkpointer import create_checkpointer
@@ -19,7 +19,7 @@ REJECTION_MESSAGE = '人工审核未通过，本次退款不会执行。'
 
 class ServiceState(TypedDict, total=False):
     task_id: str; trace_id: str; tenant_id: str; user_id: str; role: str; intent: str; message: str; order_id: str
-    customer: dict; order: dict; logistics: dict; knowledge: list[dict]; refunds: list[dict]; eligibility: dict; risk: dict; approval_chain: list[str]; review_decision: dict; ticket: dict; refund: dict; answer: str
+    customer: dict; order: dict; logistics: dict; knowledge: list[dict]; complaint: dict; refunds: list[dict]; eligibility: dict; risk: dict; approval_chain: list[str]; review_decision: dict; ticket: dict; refund: dict; answer: str
 
 
 def ctx(s): return SecurityContext(s['user_id'], s['tenant_id'], s.get('role', 'customer'))
@@ -57,13 +57,59 @@ def _node_submit_refund(s):
     return {'refund': submit_refund(ctx(s), s['order'], reason)}
 
 
-def _node_ticket(s):
-    if s['intent'] == 'complaint':
-        t = create_ticket(ctx(s), s.get('order_id'), 'complaint', s['message'], complaint=True, stale_hours=int(s.get('logistics', {}).get('last_update_hours') or 0))
-    else:
-        category = 'refund_duplicate' if s.get('eligibility', {}).get('reason') == 'DUPLICATE_REFUND_REQUEST' else 'refund_review'
-        t = create_ticket(ctx(s), s.get('order_id'), category, s['message'])
-    return {'ticket': t}
+def _node_assess_complaint(s):
+    return {'complaint': complaint_assessment(s['customer'], s.get('logistics', {}))}
+
+
+def _create_ticket(s, category, reason, complaint=False, stale_hours=0, priority=None):
+    """Create a ticket and its side-effect records in one transaction."""
+    with session_scope() as session:
+        ticket = create_ticket(
+            ctx(s),
+            s.get('order_id'),
+            category,
+            s['message'],
+            complaint=complaint,
+            stale_hours=stale_hours,
+            priority=priority,
+            session=session,
+        )
+        payload = {
+            'ticket_id': ticket['id'],
+            'order_id': ticket.get('order_id'),
+            'category': ticket['category'],
+            'priority': ticket['priority'],
+            'assigned_group': ticket['assigned_group'],
+            'reason': reason,
+            'reasons': s.get('complaint', {}).get('reasons', []),
+        }
+        emit_event(s['task_id'], 'ticket_created', payload, session=session)
+        session.add(
+            AuditLog(
+                trace_id=s['trace_id'],
+                actor_id=s['user_id'],
+                action='ticket_created',
+                detail_json=dumps(payload),
+            )
+        )
+    return {'ticket': ticket}
+
+
+def _node_complaint_ticket(s):
+    assessment = s['complaint']
+    return _create_ticket(
+        s,
+        'complaint',
+        'complaint_workflow',
+        complaint=True,
+        stale_hours=assessment['stale_hours'],
+        priority=assessment['priority'],
+    )
+
+
+def _node_refund_ticket(s):
+    category = 'refund_duplicate' if s.get('eligibility', {}).get('reason') == 'DUPLICATE_REFUND_REQUEST' else 'refund_review'
+    return _create_ticket(s, category, s.get('eligibility', {}).get('reason', 'refund_review'))
 
 
 def _node_answer(s):
@@ -77,7 +123,7 @@ def _node_answer(s):
         base = '该订单已经存在退款申请，为避免重复退款，本次不会再次创建退款。'
     else:
         base = '客服流程已完成。'
-    evidence = {'message': s['message'], 'order': s.get('order'), 'logistics': s.get('logistics'), 'eligibility': s.get('eligibility'), 'risk': s.get('risk'), 'ticket': s.get('ticket'), 'refund': s.get('refund'), 'knowledge': [{'title': x['title'], 'content': x['content']} for x in s.get('knowledge', [])]}
+    evidence = {'message': s['message'], 'order': s.get('order'), 'logistics': s.get('logistics'), 'complaint': s.get('complaint'), 'eligibility': s.get('eligibility'), 'risk': s.get('risk'), 'ticket': s.get('ticket'), 'refund': s.get('refund'), 'knowledge': [{'title': x['title'], 'content': x['content']} for x in s.get('knowledge', [])]}
     return {'answer': get_provider().chat('你是企业客服助手。只能解释系统已经完成的业务结果，不得改变退款结果、风险等级或工单优先级。', f'请用简洁自然的中文回复用户：{dumps(evidence)}', mock_response=base)}
 
 
@@ -85,13 +131,15 @@ NODES = {
     'load_customer': _node_customer,
     'load_order': _node_order,
     'load_logistics': _node_logistics,
+    'assess_complaint': _node_assess_complaint,
     'retrieve_policy': _node_knowledge,
     'load_refunds': _node_refunds,
     'check_eligibility': _node_eligibility,
     'risk_check': _node_risk,
     'human_review': _node_human_review,
     'submit_refund': _node_submit_refund,
-    'create_ticket': _node_ticket,
+    'create_complaint_ticket': _node_complaint_ticket,
+    'create_refund_ticket': _node_refund_ticket,
     'answer': _node_answer,
 }
 
@@ -153,13 +201,15 @@ def compile_graph(checkpointer=None):
     g.add_edge('load_customer', 'load_order')
     g.add_edge('load_order', 'retrieve_policy')
     g.add_conditional_edges('retrieve_policy', _after_policy, {'complaint': 'load_logistics', 'refund': 'load_refunds'})
-    g.add_edge('load_logistics', 'create_ticket')
+    g.add_edge('load_logistics', 'assess_complaint')
+    g.add_edge('assess_complaint', 'create_complaint_ticket')
+    g.add_edge('create_complaint_ticket', 'answer')
     g.add_edge('load_refunds', 'check_eligibility')
-    g.add_conditional_edges('check_eligibility', _after_eligibility, {'duplicate': 'create_ticket', 'risk': 'risk_check'})
-    g.add_conditional_edges('risk_check', _after_risk, {'human': 'human_review', 'submit': 'submit_refund', 'ticket': 'create_ticket'})
+    g.add_conditional_edges('check_eligibility', _after_eligibility, {'duplicate': 'create_refund_ticket', 'risk': 'risk_check'})
+    g.add_conditional_edges('risk_check', _after_risk, {'human': 'human_review', 'submit': 'submit_refund', 'ticket': 'create_refund_ticket'})
     g.add_conditional_edges('human_review', _after_human_review, {'submit': 'submit_refund', 'rejected': 'answer'})
     g.add_edge('submit_refund', 'answer')
-    g.add_edge('create_ticket', 'answer')
+    g.add_edge('create_refund_ticket', 'answer')
     g.add_edge('answer', END)
     return g.compile(checkpointer=checkpointer or create_checkpointer())
 
@@ -191,13 +241,15 @@ def _fallback(state):
     for n in ['load_customer', 'load_order', 'retrieve_policy']:
         s.update(run_node(n, s))
     if s['intent'] == 'complaint':
-        s.update(run_node('load_logistics', s)); s.update(run_node('create_ticket', s)); s.update(run_node('answer', s)); return s
+        for n in ['load_logistics', 'assess_complaint', 'create_complaint_ticket', 'answer']:
+            s.update(run_node(n, s))
+        return s
     for n in ['load_refunds', 'check_eligibility', 'risk_check']:
         s.update(run_node(n, s))
     if s['eligibility']['reason'] == 'DUPLICATE_REFUND_REQUEST':
-        s.update(run_node('create_ticket', s)); s.update(run_node('answer', s)); return s
+        s.update(run_node('create_refund_ticket', s)); s.update(run_node('answer', s)); return s
     if not s['eligibility']['eligible']:
-        s.update(run_node('create_ticket', s)); s.update(run_node('answer', s)); return s
+        s.update(run_node('create_refund_ticket', s)); s.update(run_node('answer', s)); return s
     if s['risk']['risk_level'] == 'high':
         return s
     s.update(run_node('submit_refund', s)); s.update(run_node('answer', s)); return s
@@ -283,6 +335,7 @@ def _completed_payload(result):
         'refund': result.get('refund'),
         'risk': result.get('risk'),
         'eligibility': result.get('eligibility'),
+        'complaint': result.get('complaint'),
     }
 
 

@@ -74,7 +74,25 @@ MODEL_CHAT_MODEL=deepseek-chat
 
 但 DeepSeek 本身不提供 `/embeddings` 与 `/rerank`，因此 Embedding / Rerank 必须继续指向支持这两个端点的兼容服务（当前配置三者共用一个 base URL）。只切换 Chat 时，请在代码或部署侧保留原 Embedding / Rerank Provider。
 
-`GET /api/v1/runtime` 返回当前 Provider、三个模型名、Mock 边界、API key 是否配置、LangGraph 可用性与数据库路径。`mock_boundary` 表示是否模拟调用（`chat: mock`），不代表凭据一定可用；`api_key_configured=false` 时真实 Embedding / Rerank 会显式报错而不是返回伪造向量。测试通过 `set_provider()` 注入 fake Provider，不访问网络、不读取真实 key。
+`GET /api/v1/runtime` 返回当前 Provider、三个模型名、Mock 边界、API key 是否配置、LangGraph 可用性、数据库路径与数据库类型。`mock_boundary` 表示是否模拟调用（`chat: mock`），不代表凭据一定可用；`api_key_configured=false` 时真实 Embedding / Rerank 会显式报错而不是返回伪造向量。测试通过 `set_provider()` 注入 fake Provider，不访问网络、不读取真实 key。
+
+## 持久化
+
+数据层使用 SQLAlchemy 2.0 ORM（`backend/app/db/models.py`），所有领域实体都有对应模型。默认零依赖使用本地 SQLite，`DATABASE_URL` 可切换到 Postgres：
+
+```dotenv
+# 默认：sqlite:///{DATABASE_PATH}
+DATABASE_PATH=./data/customer_service.db
+
+# 切换 Postgres
+DATABASE_URL=postgresql://user:password@localhost:5432/customer_service
+```
+
+- `create_all` 在启动与 `python -m app.scripts_seed` 时补齐缺失表，不引入 Alembic。
+- seed 在单个事务内清空并重建演示数据，可重复执行。
+- 退款幂等键有 UNIQUE 约束，写入使用 `ON CONFLICT DO NOTHING` 语义。
+- Task 状态、审批顺序、Trace 查询、工单查询等热点路径都有索引；多步写入使用 `session_scope()` 事务。
+- Knowledge 预留 `embedding`、`embedding_model`、`embedding_generated_at`，供后续 Embedding 缓存直接复用。
 
 ## Demo Cases
 
@@ -129,7 +147,7 @@ backend/
   app/
     api/          # HTTP 接口、SSE
     core/         # 配置、Security Context
-    db/           # 数据库与 schema
+    db/           # SQLAlchemy engine、session、models 与 create_all
     llm/          # ModelProvider：Chat / Embedding / Rerank
     rag/          # 混合检索与精排
     services/     # Router、规则、Tool、Task

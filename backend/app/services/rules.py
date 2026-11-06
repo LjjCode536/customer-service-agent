@@ -1,5 +1,3 @@
-from app.db.database import fetch_one
-
 def refund_eligibility(order, refunds):
     if refunds: return {'eligible':False,'reason':'DUPLICATE_REFUND_REQUEST'}
     if order['payment_status']!='paid': return {'eligible':False,'reason':'ORDER_NOT_PAID'}

@@ -8,5 +8,6 @@ numpy==2.4.6
 rank-bm25==0.2.2
 langgraph==1.2.20
 SQLAlchemy==2.0.57
+tenacity==9.2.1
 psycopg[binary]==3.3.8
 pytest==9.0.2

@@ -1,3 +1,15 @@
+from datetime import datetime, timedelta
+
+SLA_MINUTES = {'P0': 15, 'P1': 30, 'P2': 120, 'P3': 480}
+
+ASSIGNMENT_GROUPS = {
+    'logistics_abnormal': 'logistics_support',
+    'refund_review': 'after_sales',
+    'refund_duplicate': 'after_sales',
+    'complaint': 'complaint_specialist',
+}
+
+
 def refund_eligibility(order, refunds):
     if refunds: return {'eligible':False,'reason':'DUPLICATE_REFUND_REQUEST'}
     if order['payment_status']!='paid': return {'eligible':False,'reason':'ORDER_NOT_PAID'}
@@ -13,3 +25,21 @@ def refund_risk(order,customer,eligibility):
 
 def approval_chain(risk):
     return ['refund_specialist','service_manager'] if risk['risk_level']=='high' else []
+
+
+def ticket_priority(category, vip_level, complaint=False, stale_hours=0):
+    """Deterministic Priority: VIP strong complaint is P1, refund/payment/stale logistics is P2."""
+    if complaint and vip_level == 'vip':
+        return 'P1'
+    if category in {'refund_failed', 'payment_issue'} or stale_hours >= 24:
+        return 'P2'
+    return 'P3'
+
+
+def sla_due(priority, now=None):
+    base = now or datetime.now()
+    return (base + timedelta(minutes=SLA_MINUTES[priority])).isoformat(timespec='seconds')
+
+
+def ticket_assignment(category):
+    return ASSIGNMENT_GROUPS.get(category, 'customer_service')

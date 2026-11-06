@@ -7,6 +7,9 @@ from sqlalchemy.orm import Session
 from app.db.database import dumps, loads, session_scope, use_session, utcnow
 from app.db.models import Task, TaskEvent, TraceStep
 
+# A losing claimer may have raced on the same candidate; retry a few times before reporting idle.
+CLAIM_ATTEMPTS = 10
+
 
 def new_id(prefix):
     return f'{prefix}_{uuid4().hex[:16]}'
@@ -68,26 +71,42 @@ def update_task(
         s.flush()
 
 
+def _claim_once(session: Session):
+    waiting = ('pending', 'resume_pending')
+    candidate = (
+        select(Task.id)
+        .where(Task.status.in_(waiting))
+        .order_by(Task.created_at)
+        .limit(1)
+        .scalar_subquery()
+    )
+    tid = session.scalar(
+        update(Task)
+        .where(Task.id == candidate, Task.status.in_(waiting))
+        .values(status='running', updated_at=func.current_timestamp())
+        .returning(Task.id)
+    )
+    if not tid:
+        return None
+    session.flush()
+    return get_task(tid, session=session)
+
+
 def claim_next_task(session: Session | None = None):
-    with use_session(session) as s:
-        waiting = ('pending', 'resume_pending')
-        candidate = (
-            select(Task.id)
-            .where(Task.status.in_(waiting))
-            .order_by(Task.created_at)
-            .limit(1)
-            .scalar_subquery()
-        )
-        tid = s.scalar(
-            update(Task)
-            .where(Task.id == candidate, Task.status.in_(waiting))
-            .values(status='running', updated_at=func.current_timestamp())
-            .returning(Task.id)
-        )
-        if not tid:
-            return None
-        s.flush()
-        return get_task(tid, session=s)
+    waiting = ('pending', 'resume_pending')
+    for _ in range(CLAIM_ATTEMPTS):
+        with use_session(session) as s:
+            task = _claim_once(s)
+            if task is not None:
+                return task
+            pending = s.scalar(
+                select(func.count()).select_from(Task).where(Task.status.in_(waiting))
+            )
+            if not pending:
+                return None
+        if session is not None:
+            break
+    return None
 
 
 def emit_event(tid, event_type, payload, session: Session | None = None):

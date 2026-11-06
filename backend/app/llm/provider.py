@@ -23,6 +23,8 @@ class RerankResult:
 
 class ModelProvider(Protocol):
     name: str
+    embedding_model: str
+    embedding_dimensions: int
 
     def chat(
         self,
@@ -175,6 +177,18 @@ class MockChatProvider:
     def __init__(self, delegate: ModelProvider):
         self.name = delegate.name
         self._delegate = delegate
+
+    @property
+    def embedding_model(self) -> str:
+        return getattr(self._delegate, 'embedding_model', settings.model_embedding_model)
+
+    @property
+    def embedding_dimensions(self) -> int:
+        return getattr(
+            self._delegate,
+            'embedding_dimensions',
+            settings.model_embedding_dimensions,
+        )
 
     def chat(
         self,

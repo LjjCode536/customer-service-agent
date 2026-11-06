@@ -1,50 +1,288 @@
-import math, re
-from collections import Counter
+from __future__ import annotations
 
+import re
+from datetime import date, datetime, time, timezone
+from typing import Any, Sequence
+
+import jieba
+import numpy as np
+from rank_bm25 import BM25Okapi
 from sqlalchemy import select
 
-from app.db.database import loads, use_session
+from app.core.config import settings
+from app.db.database import loads, use_session, utcnow
 from app.db.models import Knowledge
+from app.llm.provider import ModelProvider, ProviderError, get_provider
+
+RRF_K = 60
+CANDIDATE_LIMIT = 10
+_TOKEN_RE = re.compile(r'[\w\u4e00-\u9fff]+')
 
 
-def _tokens(text): return re.findall(r'[\w\u4e00-\u9fff]+', (text or '').lower())
+def tokenize(text: str | None) -> list[str]:
+    """Chinese-aware tokenization shared by BM25 indexing and querying."""
+    return [
+        token
+        for token in jieba.lcut((text or '').lower())
+        if _TOKEN_RE.fullmatch(token)
+    ]
 
 
-def _lexical(query, text):
-    q = _tokens(query); t = _tokens(text)
-    if not q or not t: return 0.0
-    tc = Counter(t); return sum((1 + math.log(tc[x])) for x in q if tc[x]) / max(len(q), 1)
+def knowledge_text(row: Knowledge | dict[str, Any]) -> str:
+    if isinstance(row, dict):
+        title = row.get('title') or ''
+        content = row.get('content') or ''
+        keywords = row.get('keywords') or []
+    else:
+        title = row.title or ''
+        content = row.content or ''
+        keywords = loads(row.keywords_json, []) or []
+    return ' '.join(
+        part for part in (title, content, ' '.join(keywords)) if part
+    )
 
 
-def _vectorish(query, text):
-    q = set(_tokens(query)); t = set(_tokens(text))
-    return len(q & t) / max(len(q | t), 1)
-
-
-def retrieve(query, category=None, product_type=None, top_n=5):
-    with use_session() as session:
-        rows = [
-            row.to_dict()
-            for row in session.scalars(
-                select(Knowledge)
-                .where(Knowledge.status == 'active')
-                .order_by(Knowledge.effective_from.desc())
-            )
+def cache_knowledge_embeddings(session=None, provider: ModelProvider | None = None) -> int:
+    """Compute and persist embeddings for new or model-stale knowledge rows."""
+    provider = provider or get_provider()
+    model = _embedding_model(provider)
+    dimensions = getattr(provider, 'embedding_dimensions', None)
+    with use_session(session) as active_session:
+        rows = list(active_session.scalars(select(Knowledge)).all())
+        pending = [
+            row
+            for row in rows
+            if not row.embedding
+            or row.embedding_model != model
+            or (dimensions and len(row.embedding) != dimensions)
         ]
-    filtered = []
-    for r in rows:
-        if category and r['category'] != category: continue
-        if product_type and r['product_type'] not in {product_type, 'all'}: continue
-        r['keywords'] = loads(r.pop('keywords_json', '[]'), [])
-        text = r['title'] + ' ' + r['content'] + ' ' + ' '.join(r['keywords'])
-        r['bm25_score'] = round(_lexical(query, text), 4); r['vector_score'] = round(_vectorish(query, text), 4)
-        filtered.append(r)
-    a = sorted(filtered, key=lambda x: x['bm25_score'], reverse=True); b = sorted(filtered, key=lambda x: x['vector_score'], reverse=True)
-    rrf = {}; byid = {}
-    for ranker in (a, b):
-        for rank, row in enumerate(ranker, 1):
-            rrf[row['id']] = rrf.get(row['id'], 0) + 1 / (60 + rank); byid[row['id']] = row
-    out = []
-    for k, v in sorted(rrf.items(), key=lambda x: x[1], reverse=True):
-        row = byid[k]; row['rrf_score'] = round(v, 6); row['rerank_score'] = round(v * 100 + row['bm25_score'] * 0.05 + row['vector_score'], 4); out.append(row)
-    return sorted(out, key=lambda x: x['rerank_score'], reverse=True)[:top_n]
+        if not pending:
+            return 0
+        vectors = _call_provider(
+            'Embedding provider failed while caching knowledge',
+            lambda: provider.embed([knowledge_text(row) for row in pending]),
+        )
+        if len(vectors) != len(pending):
+            raise ProviderError(
+                f'Embedding provider returned {len(vectors)} vectors for '
+                f'{len(pending)} knowledge rows.'
+            )
+        generated_at = utcnow()
+        for row, vector in zip(pending, vectors):
+            if not vector:
+                raise ProviderError(
+                    f'Embedding provider returned an empty vector for knowledge {row.id}.'
+                )
+            row.embedding = [float(value) for value in vector]
+            row.embedding_model = model
+            row.embedding_generated_at = generated_at
+        active_session.flush()
+        return len(pending)
+
+
+def retrieve(
+    query: str,
+    category: str | None = None,
+    product_type: str | None = None,
+    top_n: int = 5,
+    *,
+    provider: ModelProvider | None = None,
+) -> list[dict[str, Any]]:
+    """Run BM25 + embedding recall, RRF fusion and Cross-Encoder rerank."""
+    provider = provider or get_provider()
+    now = utcnow()
+    docs = _load_active_docs(category, product_type, now)
+    if not docs:
+        return []
+
+    query_vector = _embed_query(provider, query)
+    _score_bm25(query, docs)
+    _score_vectors(query_vector, docs, _embedding_model(provider))
+
+    candidate_limit = max(CANDIDATE_LIMIT, (top_n or 1) * 2)
+    bm25_candidates = sorted(
+        [doc for doc in docs if doc['bm25_score'] != 0.0],
+        key=lambda doc: (-doc['bm25_score'], doc['id']),
+    )[:candidate_limit]
+    embedded_docs = [doc for doc in docs if doc.get('embedding')]
+    vector_candidates = sorted(
+        [doc for doc in embedded_docs if doc['vector_score'] > 0.0],
+        key=lambda doc: (-doc['vector_score'], doc['id']),
+    )[:candidate_limit]
+    if not bm25_candidates and not vector_candidates:
+        return []
+
+    bm25_ranks = {
+        doc['id']: rank for rank, doc in enumerate(bm25_candidates, start=1)
+    }
+    vector_ranks = {
+        doc['id']: rank for rank, doc in enumerate(vector_candidates, start=1)
+    }
+    fused: list[dict[str, Any]] = []
+    for doc in docs:
+        rrf_score = 0.0
+        if doc['id'] in bm25_ranks:
+            rrf_score += 1 / (RRF_K + bm25_ranks[doc['id']])
+        if doc['id'] in vector_ranks:
+            rrf_score += 1 / (RRF_K + vector_ranks[doc['id']])
+        if rrf_score == 0.0:
+            continue
+        doc['bm25_rank'] = bm25_ranks.get(doc['id'])
+        doc['vector_rank'] = vector_ranks.get(doc['id'])
+        doc['rrf_score'] = round(rrf_score, 8)
+        fused.append(doc)
+    fused.sort(key=lambda doc: (-doc['rrf_score'], doc['id']))
+
+    reranked = _rerank(provider, query, fused, top_n)
+    evidence = []
+    for result in reranked:
+        doc = dict(fused[result.index])
+        doc['rerank_score'] = round(float(result.score), 8)
+        for internal_field in ('embedding', 'embedding_model', 'embedding_generated_at'):
+            doc.pop(internal_field, None)
+        evidence.append(doc)
+    evidence.sort(
+        key=lambda doc: (-doc['rerank_score'], -doc['rrf_score'], doc['id'])
+    )
+    return evidence
+
+
+def _load_active_docs(
+    category: str | None, product_type: str | None, now: datetime
+) -> list[dict[str, Any]]:
+    with use_session() as session:
+        rows = list(
+            session.scalars(
+                select(Knowledge).where(Knowledge.status == 'active')
+            ).all()
+        )
+    docs = []
+    for row in rows:
+        effective_from = _parse_effective_from(row.effective_from)
+        if effective_from is None or effective_from > now:
+            continue
+        if category and row.category != category:
+            continue
+        if product_type and row.product_type not in {product_type, 'all'}:
+            continue
+        doc = row.to_dict()
+        doc['keywords'] = loads(doc.pop('keywords_json', '[]'), []) or []
+        docs.append(doc)
+    return docs
+
+
+def _parse_effective_from(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace('Z', '+00:00'))
+    except ValueError:
+        try:
+            parsed_date = date.fromisoformat(text)
+        except ValueError:
+            return None
+        return datetime.combine(parsed_date, time.min)
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _embedding_model(provider: ModelProvider) -> str:
+    return getattr(provider, 'embedding_model', None) or settings.model_embedding_model
+
+
+def _call_provider(action: str, call):
+    try:
+        return call()
+    except ProviderError:
+        raise
+    except Exception as exc:
+        raise ProviderError(f'{action}: {exc}') from exc
+
+
+def _embed_query(provider: ModelProvider, query: str) -> list[float]:
+    vectors = _call_provider(
+        'Embedding provider failed for query',
+        lambda: provider.embed([query]),
+    )
+    if len(vectors) != 1 or not vectors[0]:
+        raise ProviderError('Embedding provider returned no query vector.')
+    return [float(value) for value in vectors[0]]
+
+
+def _score_bm25(query: str, docs: Sequence[dict[str, Any]]) -> None:
+    corpus = [tokenize(knowledge_text(doc)) for doc in docs]
+    if not any(corpus):
+        for doc in docs:
+            doc['bm25_score'] = 0.0
+        return
+    bm25 = BM25Okapi(corpus)
+    scores = bm25.get_scores(tokenize(query))
+    for doc, score in zip(docs, scores):
+        doc['bm25_score'] = round(float(score), 8)
+
+
+def _score_vectors(
+    query_vector: Sequence[float],
+    docs: Sequence[dict[str, Any]],
+    embedding_model: str,
+) -> None:
+    for doc in docs:
+        embedding = doc.get('embedding')
+        if not embedding:
+            raise ProviderError(
+                f"Knowledge {doc['id']} has no cached embedding; "
+                're-run embedding caching before retrieval.'
+            )
+        if doc.get('embedding_model') != embedding_model:
+            raise ProviderError(
+                f"Knowledge {doc['id']} was embedded with {doc.get('embedding_model')!r}, "
+                f'not {embedding_model!r}; re-run embedding caching with the current model.'
+            )
+        if len(embedding) != len(query_vector):
+            raise ProviderError(
+                f"Knowledge {doc['id']} embedding dimension {len(embedding)} "
+                f'does not match query dimension {len(query_vector)}; '
+                're-run embedding caching with the current model.'
+            )
+        doc['vector_score'] = round(_cosine(query_vector, embedding), 8)
+
+
+def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
+    a = np.asarray(left, dtype=np.float64)
+    b = np.asarray(right, dtype=np.float64)
+    denominator = float(np.linalg.norm(a) * np.linalg.norm(b))
+    if denominator == 0.0:
+        return 0.0
+    return float(np.dot(a, b) / denominator)
+
+
+def _rerank(
+    provider: ModelProvider,
+    query: str,
+    candidates: Sequence[dict[str, Any]],
+    top_n: int,
+):
+    results = _call_provider(
+        'Rerank provider failed',
+        lambda: provider.rerank(
+            query,
+            [knowledge_text(doc) for doc in candidates],
+            top_n=top_n,
+        ),
+    )
+    if not results:
+        raise ProviderError('Rerank provider returned no results for non-empty candidates.')
+    seen: set[int] = set()
+    for result in results:
+        if result.index < 0 or result.index >= len(candidates):
+            raise ProviderError(
+                f'Rerank provider returned out-of-range candidate index {result.index}.'
+            )
+        if result.index in seen:
+            raise ProviderError(
+                f'Rerank provider returned duplicate candidate index {result.index}.'
+            )
+        seen.add(result.index)
+    return results

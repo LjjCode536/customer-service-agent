@@ -17,6 +17,7 @@ from app.db.models import (
 )
 from app.db.schema import init_schema
 from app.fixtures.mock_data import CUSTOMERS, KNOWLEDGE, LOGISTICS, ORDERS
+from app.rag.hybrid import cache_knowledge_embeddings
 
 
 def seed():
@@ -104,6 +105,8 @@ def seed():
                 for x in KNOWLEDGE
             ]
         )
+        session.flush()
+        cache_knowledge_embeddings(session)
         session.add(
             RefundRequest(
                 id='RR-HISTORY-10004',

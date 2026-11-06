@@ -3,6 +3,9 @@ uvicorn[standard]==0.48.0
 pydantic==2.13.4
 pydantic-settings==2.14.1
 httpx==0.28.1
+jieba==0.42.1
+numpy==2.4.6
+rank-bm25==0.2.2
 langgraph==1.2.20
 SQLAlchemy==2.0.57
 psycopg[binary]==3.3.8

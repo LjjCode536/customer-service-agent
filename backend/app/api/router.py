@@ -11,7 +11,7 @@ from app.core.security import SecurityContext, get_security_context
 from app.db.database import dumps, engine, loads, session_scope, utcnow
 from app.db.models import ApprovalRecord, BadCase, Knowledge, RefundRequest, Task, Ticket, TraceStep
 from app.fixtures.mock_data import MOCK_CASES
-from app.llm.provider import describe_provider
+from app.llm.provider import ProviderError, describe_provider
 from app.rag.hybrid import retrieve
 from app.services.router import route_intent
 from app.services.tasking import create_task, get_task, list_events
@@ -56,8 +56,12 @@ def chat(body: ChatRequest, ctx: SecurityContext = Depends(get_security_context)
 def _chat(body, ctx):
     r = route_intent(body.message); intent = r['intent']; oid = r.get('order_id')
     if intent == 'faq':
-        docs = retrieve(body.message, top_n=3); answer = docs[0]['content'] if docs else '当前知识库没有足够依据。'
-        return {'mode': 'direct_rag', 'intent': intent, 'answer': answer, 'citations': [{'title': x['title'], 'version': x['version']} for x in docs]}
+        try:
+            docs = retrieve(body.message, top_n=3)
+        except ProviderError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        answer = docs[0]['content'] if docs else '当前知识库没有足够依据。'
+        return {'mode': 'direct_rag', 'intent': intent, 'answer': answer, 'citations': [{'title': x['title'], 'version': x['version']} for x in docs], 'evidence': docs}
     if intent == 'chat':
         return {'mode': 'chat', 'intent': intent, 'answer': '你好，我可以帮你查询订单、物流、退款政策或创建售后工单。'}
     if not oid: raise HTTPException(400, '请提供订单号，例如 O10001')

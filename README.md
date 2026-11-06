@@ -76,6 +76,18 @@ MODEL_CHAT_MODEL=deepseek-chat
 
 `GET /api/v1/runtime` 返回当前 Provider、三个模型名、Mock 边界、API key 是否配置、LangGraph 可用性、数据库路径与数据库类型。`mock_boundary` 表示是否模拟调用（`chat: mock`），不代表凭据一定可用；`api_key_configured=false` 时真实 Embedding / Rerank 会显式报错而不是返回伪造向量。测试通过 `set_provider()` 注入 fake Provider，不访问网络、不读取真实 key。
 
+## 混合检索
+
+FAQ 请求走真实检索链路（`backend/app/rag/hybrid.py`）：
+
+1. 只加载 `status=active` 且 `effective_from <= now` 的知识版本。
+2. `jieba` 分词后，用 `rank_bm25` 的 `BM25Okapi` 做词法召回。
+3. 用 BGE-M3 计算 query 向量，与入库时缓存的 Knowledge embedding 做 numpy cosine 召回。
+4. 两路各取候选，用 RRF（`k=60`）按排名融合。
+5. 融合候选交给 BGE Reranker Cross-Encoder 精排，返回稳定排序的 Evidence。
+
+Evidence 包含 `title / version / content / bm25_score / vector_score / rrf_score / rerank_score` 以及两路排名。FAQ 响应同时返回 `citations` 和完整 `evidence`。Provider 失败时接口返回 503 或任务进入 failed，不会退回字符重合度或伪造向量。
+
 ## 持久化
 
 数据层使用 SQLAlchemy 2.0 ORM（`backend/app/db/models.py`），所有领域实体都有对应模型。默认零依赖使用本地 SQLite，`DATABASE_URL` 可切换到 Postgres：
@@ -92,7 +104,7 @@ DATABASE_URL=postgresql://user:password@localhost:5432/customer_service
 - seed 在单个事务内清空并重建演示数据，可重复执行。
 - 退款幂等键有 UNIQUE 约束，写入使用 `ON CONFLICT DO NOTHING` 语义。
 - Task 状态、审批顺序、Trace 查询、工单查询等热点路径都有索引；多步写入使用 `session_scope()` 事务。
-- Knowledge 预留 `embedding`、`embedding_model`、`embedding_generated_at`，供后续 Embedding 缓存直接复用。
+- Knowledge 在 seed 入库时批量计算并缓存 `embedding`、`embedding_model`、`embedding_generated_at`；模型标识变化时自动重算，查询时只计算 query 向量。
 
 ## Demo Cases
 
@@ -107,10 +119,12 @@ DATABASE_URL=postgresql://user:password@localhost:5432/customer_service
 
 ## Quickstart
 
-### 本地（Mock）
+### 本地（Mock Chat + 真实检索，需 API key）
+
+Mock 只替换 Chat 文本生成；Embedding 与 Rerank 始终走真实 Provider。未配置 `MODEL_API_KEY` 时 seed 与 FAQ 请求会显式失败，而不是退回假向量。
 
 ```bash
-cp .env.example .env        # 按需填写 MODEL_API_KEY
+cp .env.example .env        # 填写 MODEL_API_KEY：真实 Embedding / Rerank 必需
 cd backend
 python -m venv .venv
 # Windows: .venv\Scripts\activate

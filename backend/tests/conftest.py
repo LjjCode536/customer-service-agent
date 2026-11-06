@@ -15,7 +15,20 @@ os.environ['DATABASE_URL'] = ''
 
 
 @pytest.fixture()
-def seeded_db():
+def fake_provider():
+    from app.llm.provider import reset_provider, set_provider
+
+    from tests.fakes import DeterministicProvider
+
+    provider = DeterministicProvider()
+    reset_provider()
+    set_provider(provider)
+    yield provider
+    reset_provider()
+
+
+@pytest.fixture()
+def seeded_db(fake_provider):
     from app.db.database import engine
     from app.db.schema import init_schema
     from app.scripts_seed import seed

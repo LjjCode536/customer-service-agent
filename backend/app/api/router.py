@@ -1,9 +1,9 @@
-import asyncio, json
+import asyncio
 
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func, select, update
 from sqlalchemy.engine import make_url
+from sse_starlette.sse import EventSourceResponse
 
 from app.api.schemas import ApprovalDecision, BadCaseCreate, ChatRequest, MockCaseRequest
 from app.core.config import settings
@@ -14,7 +14,7 @@ from app.fixtures.mock_data import MOCK_CASES
 from app.llm.provider import ProviderError, describe_provider
 from app.rag.hybrid import retrieve
 from app.services.router import route_intent
-from app.services.tasking import create_task, get_task, list_events
+from app.services.tasking import create_task, get_task, list_events, record_audit
 from app.services.tools import create_ticket, get_customer, get_logistics, get_order
 
 router = APIRouter(prefix='/api/v1')
@@ -74,7 +74,21 @@ def _chat(body, ctx):
             log = get_logistics(oid, ctx)
             if not log: return {'mode': 'direct_tool', 'intent': intent, 'answer': '该订单暂无物流信息。'}
             ticket = None
-            if int(log['last_update_hours']) >= 24: ticket = create_ticket(ctx, oid, 'logistics_abnormal', body.message, stale_hours=int(log['last_update_hours']))
+            if int(log['last_update_hours']) >= 24:
+                ticket = create_ticket(ctx, oid, 'logistics_abnormal', body.message, stale_hours=int(log['last_update_hours']))
+                record_audit(
+                    None,
+                    ctx.user_id,
+                    'ticket_created',
+                    {
+                        'ticket_id': ticket['id'],
+                        'order_id': ticket.get('order_id'),
+                        'category': ticket['category'],
+                        'priority': ticket['priority'],
+                        'assigned_group': ticket['assigned_group'],
+                        'source': 'direct_tool',
+                    },
+                )
             return {'mode': 'direct_tool', 'intent': intent, 'logistics': log, 'ticket': ticket, 'answer': f"当前物流状态 {log['status']}，最后节点：{log['last_event']}。" + (f" 已创建工单 {ticket['id']}。" if ticket else '')}
     except PermissionError as e:
         raise HTTPException(403, str(e))
@@ -90,21 +104,58 @@ def task(task_id):
     return x
 
 
+TERMINAL_TASK_STATUSES = {'completed', 'failed'}
+
+
+def _resume_cursor(request: Request) -> int:
+    """Resume an SSE stream from ?after= or the standard Last-Event-ID header."""
+    for raw in (request.query_params.get('after'), request.headers.get('last-event-id')):
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _sse_frame(event):
+    return {
+        'id': str(event['id']),
+        'data': dumps(
+            {
+                'id': event['id'],
+                'event_type': event['event_type'],
+                'created_at': event['created_at'],
+                **event['payload'],
+            }
+        ),
+    }
+
+
 @router.get('/tasks/{task_id}/events')
-async def events(task_id):
+async def events(task_id: str, request: Request):
+    if not get_task(task_id):
+        raise HTTPException(404, 'task not found')
+
+    after = _resume_cursor(request)
+
     async def stream():
-        last = 0; idle = 0
+        last = after
         while True:
-            es = list_events(task_id, last)
-            for e in es:
-                last = e['id']
-                yield f"data: {json.dumps({'id': e['id'], 'event_type': e['event_type'], 'created_at': e['created_at'], **e['payload']}, ensure_ascii=False, default=str)}\n\n"
-            t = get_task(task_id)
-            if t and t['status'] in {'completed', 'failed'} and not es: break
-            idle += 1
-            if idle > 240: break
-            await asyncio.sleep(.5)
-    return StreamingResponse(stream(), media_type='text/event-stream')
+            if await request.is_disconnected():
+                return
+            for event in list_events(task_id, last):
+                last = event['id']
+                yield _sse_frame(event)
+
+            task = get_task(task_id)
+            if task and task['status'] in TERMINAL_TASK_STATUSES:
+                # Drain events committed together with the terminal status, then end.
+                for event in list_events(task_id, last):
+                    yield _sse_frame(event)
+                return
+            await asyncio.sleep(settings.sse_poll_interval)
+
+    return EventSourceResponse(stream(), ping=settings.sse_ping_interval)
 
 
 @router.get('/tickets')
@@ -144,12 +195,14 @@ def approve(approval_id, body: ApprovalDecision):
         ).first()
         if prior: raise HTTPException(409, f"请先完成前置审批：{prior.approver_role}")
 
+        task_row = s.get(Task, a.task_id)
         a.status = body.status
         a.approver_user_id = body.approver_user_id
         a.comment = body.comment
         a.updated_at = utcnow()
+        cancelled = 0
         if body.status == 'rejected':
-            s.execute(
+            result = s.execute(
                 update(ApprovalRecord)
                 .where(
                     ApprovalRecord.task_id == a.task_id,
@@ -158,6 +211,7 @@ def approve(approval_id, body: ApprovalDecision):
                 )
                 .values(status='cancelled', updated_at=func.current_timestamp())
             )
+            cancelled = result.rowcount or 0
         s.flush()
         allrows = [
             row.to_dict()
@@ -165,8 +219,22 @@ def approve(approval_id, body: ApprovalDecision):
                 select(ApprovalRecord).where(ApprovalRecord.task_id == a.task_id)
             )
         ]
+        record_audit(
+            task_row.trace_id if task_row else None,
+            body.approver_user_id,
+            f'approval_{body.status}',
+            {
+                'approval_id': a.id,
+                'task_id': a.task_id,
+                'order_id': a.order_id,
+                'approver_role': a.approver_role,
+                'sequence_no': a.sequence_no,
+                'comment': body.comment,
+                'cancelled_approvals': cancelled,
+            },
+            session=s,
+        )
         if any(r['status'] == 'rejected' for r in allrows) or not any(r['status'] == 'pending' for r in allrows):
-            task_row = s.get(Task, a.task_id)
             if task_row:
                 task_row.status = 'resume_pending'
                 task_row.current_step = 'approval_resume'

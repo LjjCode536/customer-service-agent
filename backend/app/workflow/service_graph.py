@@ -5,11 +5,19 @@ from sqlalchemy import func, select
 from app.core.config import settings
 from app.core.security import SecurityContext
 from app.db.database import dumps, session_scope, use_session
-from app.db.models import ApprovalRecord, AuditLog, TraceStep
+from app.db.models import ApprovalRecord
 from app.llm.provider import get_provider
 from app.rag.hybrid import retrieve
 from app.services.rules import approval_chain, complaint_assessment, refund_eligibility, refund_risk
-from app.services.tasking import emit_event, get_task, new_id, trace_step, update_task
+from app.services.tasking import (
+    emit_event,
+    get_task,
+    new_id,
+    record_audit,
+    record_trace,
+    trace_step,
+    update_task,
+)
 from app.services.tools import create_ticket, get_customer, get_logistics, get_order, get_refunds, submit_refund
 from app.workflow.checkpointer import create_checkpointer
 
@@ -52,9 +60,28 @@ def _node_human_review(s):
     return {'review_decision': decision or {}}
 
 
+def _submit_refund_recorded(s, order, reason):
+    """Submit a refund and persist its Audit record in the same transaction."""
+    with session_scope() as session:
+        refund = submit_refund(ctx(s), order, reason, session=session)
+        payload = {
+            'refund_id': refund['id'],
+            'order_id': refund['order_id'],
+            'external_refund_id': refund['external_refund_id'],
+            'amount': refund['amount'],
+            'reason': reason,
+            'idempotent_reuse': refund['idempotent_reuse'],
+        }
+        if not refund['idempotent_reuse']:
+            # Repeated resumes reuse the existing refund; only the real side effect is audited.
+            record_audit(s['trace_id'], s['user_id'], 'refund_submitted', payload, session=session)
+            emit_event(s['task_id'], 'refund_submitted', payload, session=session)
+    return refund
+
+
 def _node_submit_refund(s):
     reason = 'approved_high_value_refund' if s['risk']['risk_level'] == 'high' else 'agent_refund'
-    return {'refund': submit_refund(ctx(s), s['order'], reason)}
+    return {'refund': _submit_refund_recorded(s, s['order'], reason)}
 
 
 def _node_assess_complaint(s):
@@ -84,14 +111,7 @@ def _create_ticket(s, category, reason, complaint=False, stale_hours=0, priority
             'reasons': s.get('complaint', {}).get('reasons', []),
         }
         emit_event(s['task_id'], 'ticket_created', payload, session=session)
-        session.add(
-            AuditLog(
-                trace_id=s['trace_id'],
-                actor_id=s['user_id'],
-                action='ticket_created',
-                detail_json=dumps(payload),
-            )
-        )
+        record_audit(s['trace_id'], s['user_id'], 'ticket_created', payload, session=session)
     return {'ticket': ticket}
 
 
@@ -144,30 +164,60 @@ NODES = {
 }
 
 
+# Trace a compact, replayable slice of state for each node.
+NODE_INPUT_KEYS = {
+    'load_customer': ('user_id', 'tenant_id'),
+    'load_order': ('order_id',),
+    'load_logistics': ('order_id',),
+    'assess_complaint': ('customer', 'logistics'),
+    'retrieve_policy': ('message', 'intent', 'order'),
+    'load_refunds': ('order_id',),
+    'check_eligibility': ('order', 'refunds'),
+    'risk_check': ('order', 'customer', 'eligibility'),
+    'human_review': ('order_id', 'risk', 'eligibility', 'approval_chain'),
+    'submit_refund': ('order', 'risk'),
+    'create_complaint_ticket': ('order_id', 'message', 'complaint'),
+    'create_refund_ticket': ('order_id', 'message', 'eligibility'),
+    'answer': ('message', 'ticket', 'refund', 'eligibility', 'review_decision'),
+}
+
+
+def _trace_input(name, s):
+    data = {'intent': s.get('intent'), 'order_id': s.get('order_id')}
+    for key in NODE_INPUT_KEYS.get(name, ()):
+        data[key] = s.get(key)
+    return data
+
+
 def run_node(name, s):
+    trace_input = _trace_input(name, s)
     emit_event(s['task_id'], 'node_start', {'node': name})
     if name == 'human_review':
         # interrupt() is control flow, not a failure: never record it as a failed trace.
-        out = NODES[name](s)
-        _trace_human_review(s, out)
+        from langgraph.errors import GraphInterrupt
+
+        try:
+            out = trace_step(
+                s['trace_id'],
+                name,
+                trace_input,
+                lambda: NODES[name](s),
+                skip_exceptions=(GraphInterrupt,),
+            )
+        except GraphInterrupt:
+            emit_event(s['task_id'], 'node_paused', {'node': name})
+            raise
+        except Exception as exc:
+            emit_event(s['task_id'], 'node_failed', {'node': name, 'error': str(exc)})
+            raise
     else:
-        out = trace_step(s['trace_id'], name, {'intent': s['intent'], 'order_id': s.get('order_id')}, lambda: NODES[name](s))
+        try:
+            out = trace_step(s['trace_id'], name, trace_input, lambda: NODES[name](s))
+        except Exception as exc:
+            emit_event(s['task_id'], 'node_failed', {'node': name, 'error': str(exc)})
+            raise
     emit_event(s['task_id'], 'node_completed', {'node': name, 'output': out})
     return out
-
-
-def _trace_human_review(s, out):
-    with session_scope() as session:
-        session.add(
-            TraceStep(
-                trace_id=s['trace_id'],
-                node='human_review',
-                status='success',
-                latency_ms=0,
-                input_json=dumps({'intent': s['intent'], 'order_id': s.get('order_id')}),
-                output_json=dumps(out),
-            )
-        )
 
 
 def _after_policy(s): return 'complaint' if s['intent'] == 'complaint' else 'refund'
@@ -314,15 +364,15 @@ def _mark_waiting(task, result):
         ensure_approvals(task['id'], result['order_id'], payload['approval_chain'], session=s)
         update_task(task['id'], status='waiting_approval', current_step='human_review', result=payload, session=s)
         emit_event(task['id'], 'human_review_required', payload, session=s)
-        s.add(
-            TraceStep(
-                trace_id=task['trace_id'],
-                node='human_review',
-                status='waiting_approval',
-                latency_ms=0,
-                input_json=dumps({'intent': task['intent'], 'order_id': result.get('order_id')}),
-                output_json=dumps(payload),
-            )
+        record_trace(
+            task['trace_id'],
+            'human_review',
+            status='waiting_approval',
+            input_data=_trace_input(
+                'human_review', {**result, 'intent': task['intent']}
+            ),
+            output=payload,
+            session=s,
         )
     return payload
 
@@ -344,13 +394,12 @@ def _mark_completed(task, result, current_step='done', payload=None):
     with session_scope() as s:
         update_task(task['id'], status='completed', current_step=current_step, result=payload, session=s)
         emit_event(task['id'], 'task_completed', payload, session=s)
-        s.add(
-            AuditLog(
-                trace_id=task['trace_id'],
-                actor_id=task['user_id'],
-                action='service_workflow_completed',
-                detail_json=dumps(payload),
-            )
+        record_audit(
+            task['trace_id'],
+            task['user_id'],
+            'service_workflow_completed',
+            payload,
+            session=s,
         )
     return payload
 
@@ -387,8 +436,16 @@ def _approvals(task_id):
 def _fallback_resume(task, approved):
     if not approved:
         return {'answer': REJECTION_MESSAGE, 'refund': None}
-    p = task['payload']; c = SecurityContext(task['user_id'], task['tenant_id'], p.get('role', 'customer'))
-    order = get_order(p['order_id'], c); refund = submit_refund(c, order, 'approved_high_value_refund')
+    p = task['payload']
+    state = {
+        'task_id': task['id'],
+        'trace_id': task['trace_id'],
+        'user_id': task['user_id'],
+        'tenant_id': task['tenant_id'],
+        'role': p.get('role', 'customer'),
+    }
+    order = get_order(p['order_id'], ctx(state))
+    refund = _submit_refund_recorded(state, order, 'approved_high_value_refund')
     return {'refund': refund, 'answer': f"人工审核已通过，退款 {float(refund['amount']):.2f} 元已提交，退款单号 {refund['external_refund_id']}。"}
 
 

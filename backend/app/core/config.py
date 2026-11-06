@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     database_url: str = ''
     checkpoint_path: str = ''
     workflow_engine: str = 'langgraph'
+    sse_poll_interval: float = 0.5
+    sse_ping_interval: float = 15.0
     cors_origins: str = 'http://localhost:5173,http://localhost:3000'
     model_provider: str = 'siliconflow'
     model_api_key: str = ''

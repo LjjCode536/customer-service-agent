@@ -5,7 +5,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.db.database import dumps, loads, session_scope, use_session, utcnow
-from app.db.models import Task, TaskEvent, TraceStep
+from app.db.models import AuditLog, Task, TaskEvent, TraceStep
 
 # A losing claimer may have raced on the same candidate; retry a few times before reporting idle.
 CLAIM_ATTEMPTS = 10
@@ -130,35 +130,70 @@ def list_events(tid, after=0, session: Session | None = None):
         return result
 
 
-def trace_step(trace, node, input_data, fn):
+def record_trace(
+    trace,
+    node,
+    *,
+    status,
+    input_data=None,
+    output=None,
+    error=None,
+    latency_ms=0,
+    session: Session | None = None,
+):
+    """Persist one trace step. Callers may join an existing transaction."""
+    with use_session(session) as s:
+        s.add(
+            TraceStep(
+                trace_id=trace,
+                node=node,
+                status=status,
+                latency_ms=latency_ms,
+                input_json=dumps(input_data or {}),
+                output_json=dumps(output or {}),
+                error=error,
+            )
+        )
+        s.flush()
+
+
+def trace_step(trace, node, input_data, fn, skip_exceptions=()):
     st = time.perf_counter()
     try:
         out = fn()
-        ms = int((time.perf_counter() - st) * 1000)
-        with session_scope() as s:
-            s.add(
-                TraceStep(
-                    trace_id=trace,
-                    node=node,
-                    status='success',
-                    latency_ms=ms,
-                    input_json=dumps(input_data),
-                    output_json=dumps(out),
-                )
-            )
-        return out
-    except Exception as e:
-        ms = int((time.perf_counter() - st) * 1000)
-        with session_scope() as s:
-            s.add(
-                TraceStep(
-                    trace_id=trace,
-                    node=node,
-                    status='failed',
-                    latency_ms=ms,
-                    input_json=dumps(input_data),
-                    output_json='{}',
-                    error=str(e),
-                )
-            )
+    except skip_exceptions:
+        # Control-flow exceptions (e.g. LangGraph interrupt) are not node failures.
         raise
+    except Exception as e:
+        record_trace(
+            trace,
+            node,
+            status='failed',
+            input_data=input_data,
+            error=str(e),
+            latency_ms=int((time.perf_counter() - st) * 1000),
+        )
+        raise
+    record_trace(
+        trace,
+        node,
+        status='success',
+        input_data=input_data,
+        output=out,
+        latency_ms=int((time.perf_counter() - st) * 1000),
+    )
+    return out
+
+
+def record_audit(trace_id, actor_id, action, detail, session: Session | None = None):
+    """Persist an immutable audit record for a side effect or approval decision."""
+    with use_session(session) as s:
+        s.add(
+            AuditLog(
+                trace_id=trace_id,
+                actor_id=actor_id,
+                action=action,
+                detail_json=dumps(detail),
+            )
+        )
+        s.flush()

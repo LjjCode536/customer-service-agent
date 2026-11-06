@@ -24,6 +24,7 @@ router = APIRouter(prefix='/api/v1')
 def runtime():
     try:
         import langgraph
+        import langgraph.checkpoint.sqlite  # noqa: F401
         lg = True
     except Exception:
         lg = False
@@ -32,6 +33,8 @@ def runtime():
         'mock_mode': settings.mock_mode,
         **describe_provider(),
         'langgraph_available': lg,
+        'workflow_engine': settings.workflow_engine,
+        'checkpoint_path': settings.checkpoint_file,
         'database': database_url,
         'database_type': engine.dialect.name,
     }

@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     mock_mode: bool = True
     database_path: str = './data/customer_service.db'
     database_url: str = ''
+    checkpoint_path: str = ''
+    workflow_engine: str = 'langgraph'
     cors_origins: str = 'http://localhost:5173,http://localhost:3000'
     model_provider: str = 'siliconflow'
     model_api_key: str = ''
@@ -36,13 +38,26 @@ class Settings(BaseSettings):
     def sqlalchemy_url(self) -> str:
         return normalize_database_url(self.database_url, self.database_path)
 
-    def ensure_dirs(self):
+    @property
+    def checkpoint_file(self) -> str:
+        """Durable LangGraph checkpoint store, kept separate from business tables."""
+        if self.checkpoint_path:
+            return self.checkpoint_path
         url = self.sqlalchemy_url
-        if not url.startswith('sqlite'):
-            return
-        path = url.split(':///', 1)[1] if ':///' in url else ''
-        if path and path != ':memory:':
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
+        if url.startswith('sqlite'):
+            path = url.split(':///', 1)[1] if ':///' in url else ''
+            if path and path != ':memory:':
+                return path + '.checkpoints'
+        return './data/checkpoints.db'
+
+    def ensure_dirs(self):
+        paths = [self.checkpoint_file]
+        url = self.sqlalchemy_url
+        if url.startswith('sqlite') and ':///' in url:
+            paths.append(url.split(':///', 1)[1])
+        for path in paths:
+            if path and path != ':memory:':
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
 
 
 settings = Settings()

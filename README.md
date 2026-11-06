@@ -106,6 +106,8 @@ DATABASE_URL=postgresql://user:password@localhost:5432/customer_service
 - Task 状态、审批顺序、Trace 查询、工单查询等热点路径都有索引；多步写入使用 `session_scope()` 事务。
 - Knowledge 在 seed 入库时批量计算并缓存 `embedding`、`embedding_model`、`embedding_generated_at`；模型标识变化时自动重算，查询时只计算 query 向量。
 
+退款 Workflow 由 LangGraph 主路径执行，`human_review` 节点用 `interrupt()` 暂停，checkpoint 默认写入 `{DATABASE_PATH}.checkpoints`（SQLite）或 `./data/checkpoints.db`（非 SQLite），可用 `CHECKPOINT_PATH` 覆盖。审批全部通过后 Task 进入 `resume_pending`，Worker 以 `Command(resume=...)` 从暂停点继续。`WORKFLOW_ENGINE=fallback` 只用于测试或 LangGraph 不可用时的显式降级，默认不会静默回退。
+
 ## Demo Cases
 
 | Case | 输入 | 预期 |

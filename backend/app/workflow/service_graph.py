@@ -2,19 +2,24 @@ from typing import TypedDict
 
 from sqlalchemy import func, select
 
+from app.core.config import settings
 from app.core.security import SecurityContext
 from app.db.database import dumps, session_scope, use_session
-from app.db.models import ApprovalRecord, AuditLog
+from app.db.models import ApprovalRecord, AuditLog, TraceStep
 from app.llm.provider import get_provider
 from app.rag.hybrid import retrieve
 from app.services.rules import approval_chain, refund_eligibility, refund_risk
-from app.services.tasking import emit_event, new_id, trace_step, update_task
+from app.services.tasking import emit_event, get_task, new_id, trace_step, update_task
 from app.services.tools import create_ticket, get_customer, get_logistics, get_order, get_refunds, submit_refund
+from app.workflow.checkpointer import create_checkpointer
+
+HIGH_RISK_REVIEW_MESSAGE = '该退款金额较高，已进入人工审核，审核通过后系统会继续原退款流程。'
+REJECTION_MESSAGE = '人工审核未通过，本次退款不会执行。'
 
 
 class ServiceState(TypedDict, total=False):
     task_id: str; trace_id: str; tenant_id: str; user_id: str; role: str; intent: str; message: str; order_id: str
-    customer: dict; order: dict; logistics: dict; knowledge: list[dict]; refunds: list[dict]; eligibility: dict; risk: dict; approval_chain: list[str]; ticket: dict; refund: dict; answer: str
+    customer: dict; order: dict; logistics: dict; knowledge: list[dict]; refunds: list[dict]; eligibility: dict; risk: dict; approval_chain: list[str]; review_decision: dict; ticket: dict; refund: dict; answer: str
 
 
 def ctx(s): return SecurityContext(s['user_id'], s['tenant_id'], s.get('role', 'customer'))
@@ -38,16 +43,33 @@ def _node_risk(s):
     r = refund_risk(s['order'], s['customer'], s['eligibility']); return {'risk': r, 'approval_chain': approval_chain(r)}
 
 
+def _node_human_review(s):
+    """Pause the graph with a durable checkpoint and wait for the whole approval chain."""
+    ensure_approvals(s['task_id'], s['order_id'], s['approval_chain'])
+    from langgraph.types import interrupt
+
+    decision = interrupt(_waiting_payload(s))
+    return {'review_decision': decision or {}}
+
+
+def _node_submit_refund(s):
+    reason = 'approved_high_value_refund' if s['risk']['risk_level'] == 'high' else 'agent_refund'
+    return {'refund': submit_refund(ctx(s), s['order'], reason)}
+
+
 def _node_ticket(s):
     if s['intent'] == 'complaint':
         t = create_ticket(ctx(s), s.get('order_id'), 'complaint', s['message'], complaint=True, stale_hours=int(s.get('logistics', {}).get('last_update_hours') or 0))
     else:
-        t = create_ticket(ctx(s), s.get('order_id'), 'refund_duplicate', s['message'])
+        category = 'refund_duplicate' if s.get('eligibility', {}).get('reason') == 'DUPLICATE_REFUND_REQUEST' else 'refund_review'
+        t = create_ticket(ctx(s), s.get('order_id'), category, s['message'])
     return {'ticket': t}
 
 
 def _node_answer(s):
-    if s.get('ticket'):
+    if s.get('review_decision') and not s['review_decision'].get('approved'):
+        base = REJECTION_MESSAGE
+    elif s.get('ticket'):
         base = f"已为你创建工单 {s['ticket']['id']}，优先级 {s['ticket']['priority']}，已分派到 {s['ticket']['assigned_group']}。"
     elif s.get('refund'):
         base = f"退款申请已提交，金额 {float(s['refund']['amount']):.2f} 元，退款单号 {s['refund']['external_refund_id']}。"
@@ -59,63 +81,146 @@ def _node_answer(s):
     return {'answer': get_provider().chat('你是企业客服助手。只能解释系统已经完成的业务结果，不得改变退款结果、风险等级或工单优先级。', f'请用简洁自然的中文回复用户：{dumps(evidence)}', mock_response=base)}
 
 
-NODES = {'load_customer': _node_customer, 'load_order': _node_order, 'load_logistics': _node_logistics, 'retrieve_policy': _node_knowledge, 'load_refunds': _node_refunds, 'check_eligibility': _node_eligibility, 'risk_check': _node_risk, 'create_ticket': _node_ticket, 'answer': _node_answer}
+NODES = {
+    'load_customer': _node_customer,
+    'load_order': _node_order,
+    'load_logistics': _node_logistics,
+    'retrieve_policy': _node_knowledge,
+    'load_refunds': _node_refunds,
+    'check_eligibility': _node_eligibility,
+    'risk_check': _node_risk,
+    'human_review': _node_human_review,
+    'submit_refund': _node_submit_refund,
+    'create_ticket': _node_ticket,
+    'answer': _node_answer,
+}
 
 
 def run_node(name, s):
     emit_event(s['task_id'], 'node_start', {'node': name})
-    out = trace_step(s['trace_id'], name, {'intent': s['intent'], 'order_id': s.get('order_id')}, lambda: NODES[name](s)); emit_event(s['task_id'], 'node_completed', {'node': name, 'output': out}); return out
-
-
-def _fallback(state):
-    s = dict(state)
-    for n in ['load_customer', 'load_order']:
-        s.update(run_node(n, s))
-    if s['intent'] == 'complaint':
-        if s['order'].get('tracking_no'): s.update(run_node('load_logistics', s))
-        s.update(run_node('retrieve_policy', s)); s.update(run_node('create_ticket', s)); s.update(run_node('answer', s)); return s
-    for n in ['retrieve_policy', 'load_refunds', 'check_eligibility', 'risk_check']:
-        s.update(run_node(n, s))
-    if s['eligibility']['reason'] == 'DUPLICATE_REFUND_REQUEST':
-        s.update(run_node('create_ticket', s)); s.update(run_node('answer', s)); return s
-    if s['risk']['risk_level'] == 'high':
-        s.update(run_node('answer', s)); return s
-    if s['eligibility']['eligible']:
-        s['refund'] = submit_refund(ctx(s), s['order'], 'agent_refund')
+    if name == 'human_review':
+        # interrupt() is control flow, not a failure: never record it as a failed trace.
+        out = NODES[name](s)
+        _trace_human_review(s, out)
     else:
-        s['ticket'] = create_ticket(ctx(s), s['order_id'], 'refund_review', s['message'])
-    s.update(run_node('answer', s)); return s
+        out = trace_step(s['trace_id'], name, {'intent': s['intent'], 'order_id': s.get('order_id')}, lambda: NODES[name](s))
+    emit_event(s['task_id'], 'node_completed', {'node': name, 'output': out})
+    return out
 
 
-def _build_graph():
-    try:
-        from langgraph.graph import StateGraph, END
-    except Exception:
-        return None
+def _trace_human_review(s, out):
+    with session_scope() as session:
+        session.add(
+            TraceStep(
+                trace_id=s['trace_id'],
+                node='human_review',
+                status='success',
+                latency_ms=0,
+                input_json=dumps({'intent': s['intent'], 'order_id': s.get('order_id')}),
+                output_json=dumps(out),
+            )
+        )
+
+
+def _after_policy(s): return 'complaint' if s['intent'] == 'complaint' else 'refund'
+
+
+def _after_eligibility(s):
+    return 'duplicate' if s['eligibility']['reason'] == 'DUPLICATE_REFUND_REQUEST' else 'risk'
+
+
+def _after_risk(s):
+    if not s['eligibility']['eligible']:
+        return 'ticket'
+    return 'human' if s['risk']['risk_level'] == 'high' else 'submit'
+
+
+def _after_human_review(s):
+    return 'submit' if s.get('review_decision', {}).get('approved') else 'rejected'
+
+
+def compile_graph(checkpointer=None):
+    """Compile the real refund workflow; a caller may pass a fresh checkpointer to test restart recovery."""
+    from langgraph.graph import END, StateGraph
+
     g = StateGraph(ServiceState)
     for name in NODES:
         def make(n):
             return lambda s: run_node(n, s)
         g.add_node(name, make(name))
 
-    def decision_after_order(s): return 'complaint' if s['intent'] == 'complaint' else 'refund'
+    g.set_entry_point('load_customer')
+    g.add_edge('load_customer', 'load_order')
+    g.add_edge('load_order', 'retrieve_policy')
+    g.add_conditional_edges('retrieve_policy', _after_policy, {'complaint': 'load_logistics', 'refund': 'load_refunds'})
+    g.add_edge('load_logistics', 'create_ticket')
+    g.add_edge('load_refunds', 'check_eligibility')
+    g.add_conditional_edges('check_eligibility', _after_eligibility, {'duplicate': 'create_ticket', 'risk': 'risk_check'})
+    g.add_conditional_edges('risk_check', _after_risk, {'human': 'human_review', 'submit': 'submit_refund', 'ticket': 'create_ticket'})
+    g.add_conditional_edges('human_review', _after_human_review, {'submit': 'submit_refund', 'rejected': 'answer'})
+    g.add_edge('submit_refund', 'answer')
+    g.add_edge('create_ticket', 'answer')
+    g.add_edge('answer', END)
+    return g.compile(checkpointer=checkpointer or create_checkpointer())
 
-    def after_eligibility(s):
-        if s['eligibility']['reason'] == 'DUPLICATE_REFUND_REQUEST': return 'duplicate'
-        return 'risk'
 
-    def after_risk(s): return 'human' if s['risk']['risk_level'] == 'high' else 'finish'
-
-    g.set_entry_point('load_customer'); g.add_edge('load_customer', 'load_order')
-    g.add_conditional_edges('load_order', decision_after_order, {'complaint': 'retrieve_policy', 'refund': 'retrieve_policy'})
-    g.add_conditional_edges('retrieve_policy', lambda s: 'complaint' if s['intent'] == 'complaint' else 'refund', {'complaint': 'create_ticket', 'refund': 'load_refunds'})
-    g.add_edge('load_refunds', 'check_eligibility'); g.add_conditional_edges('check_eligibility', after_eligibility, {'duplicate': 'create_ticket', 'risk': 'risk_check'})
-    # Real side effects and human approval are finalized outside the graph to preserve idempotency and durable approval state.
-    g.add_edge('risk_check', 'answer'); g.add_edge('create_ticket', 'answer'); g.add_edge('answer', END)
-    return g.compile()
+def _build_graph():
+    try:
+        return compile_graph()
+    except Exception:
+        # LangGraph (or its SQLite checkpointer) is unavailable. process_task refuses to
+        # silently downgrade unless WORKFLOW_ENGINE=fallback is set explicitly.
+        return None
 
 
 GRAPH = _build_graph()
+
+
+def _graph_for_execution():
+    if GRAPH is not None:
+        return GRAPH
+    if settings.workflow_engine == 'fallback':
+        return None
+    if settings.workflow_engine != 'langgraph':
+        raise RuntimeError(f'UNKNOWN_WORKFLOW_ENGINE:{settings.workflow_engine}')
+    raise RuntimeError('LANGGRAPH_UNAVAILABLE')
+
+
+def _fallback(state):
+    s = dict(state)
+    for n in ['load_customer', 'load_order', 'retrieve_policy']:
+        s.update(run_node(n, s))
+    if s['intent'] == 'complaint':
+        s.update(run_node('load_logistics', s)); s.update(run_node('create_ticket', s)); s.update(run_node('answer', s)); return s
+    for n in ['load_refunds', 'check_eligibility', 'risk_check']:
+        s.update(run_node(n, s))
+    if s['eligibility']['reason'] == 'DUPLICATE_REFUND_REQUEST':
+        s.update(run_node('create_ticket', s)); s.update(run_node('answer', s)); return s
+    if not s['eligibility']['eligible']:
+        s.update(run_node('create_ticket', s)); s.update(run_node('answer', s)); return s
+    if s['risk']['risk_level'] == 'high':
+        return s
+    s.update(run_node('submit_refund', s)); s.update(run_node('answer', s)); return s
+
+
+def _config(task_id):
+    return {'configurable': {'thread_id': task_id}}
+
+
+def _interrupt_value(result):
+    interrupts = result.get('__interrupt__') if isinstance(result, dict) else None
+    if not interrupts:
+        return None
+    first = interrupts[0]
+    return getattr(first, 'value', first)
+
+
+def _needs_human_review(result):
+    return (
+        result.get('risk', {}).get('risk_level') == 'high'
+        and result.get('eligibility', {}).get('eligible') is True
+        and not result.get('refund')
+    )
 
 
 def ensure_approvals(task_id, order_id, chain, session=None):
@@ -141,31 +246,50 @@ def ensure_approvals(task_id, order_id, chain, session=None):
         s.flush()
 
 
-def process_task(task):
-    p = task['payload']; state: ServiceState = {'task_id': task['id'], 'trace_id': task['trace_id'], 'tenant_id': task['tenant_id'], 'user_id': task['user_id'], 'role': p.get('role', 'customer'), 'intent': task['intent'], 'message': p['message'], 'order_id': p.get('order_id')}
+def _waiting_payload(result):
+    return {
+        'status': 'waiting_approval',
+        'risk': result.get('risk'),
+        'approval_chain': result.get('approval_chain') or approval_chain(result.get('risk') or {}),
+        'eligibility': result.get('eligibility'),
+        'answer': HIGH_RISK_REVIEW_MESSAGE,
+    }
+
+
+def _mark_waiting(task, result):
+    payload = _waiting_payload(result)
     with session_scope() as s:
-        update_task(task['id'], status='running', current_step='workflow', session=s)
-        emit_event(task['id'], 'workflow_start', {'intent': task['intent']}, session=s)
-    result = GRAPH.invoke(state) if GRAPH is not None else _fallback(state)
-    # LangGraph path deliberately postpones side effects until here.
-    if GRAPH is not None and task['intent'] == 'refund':
-        if result.get('eligibility', {}).get('reason') == 'DUPLICATE_REFUND_REQUEST':
-            if not result.get('ticket'): result['ticket'] = create_ticket(ctx(result), result['order_id'], 'refund_duplicate', result['message'])
-        elif result.get('risk', {}).get('risk_level') != 'high':
-            if result.get('eligibility', {}).get('eligible'): result['refund'] = submit_refund(ctx(result), result['order'], 'agent_refund')
-            else: result['ticket'] = create_ticket(ctx(result), result['order_id'], 'refund_review', result['message'])
-        result.update(_node_answer(result))
-    if task['intent'] == 'refund' and result.get('risk', {}).get('risk_level') == 'high' and result.get('eligibility', {}).get('reason') != 'DUPLICATE_REFUND_REQUEST':
-        chain = result.get('approval_chain') or ['refund_specialist', 'service_manager']
-        payload = {'status': 'waiting_approval', 'risk': result['risk'], 'approval_chain': chain, 'eligibility': result['eligibility'], 'answer': '该退款金额较高，已进入人工审核，审核通过后系统会继续原退款流程。'}
-        with session_scope() as s:
-            ensure_approvals(task['id'], result['order_id'], chain, session=s)
-            update_task(task['id'], status='waiting_approval', current_step='human_review', result=payload, session=s)
-            emit_event(task['id'], 'human_review_required', payload, session=s)
-        return payload
-    payload = {'status': 'completed', 'answer': result.get('answer'), 'ticket': result.get('ticket'), 'refund': result.get('refund'), 'risk': result.get('risk'), 'eligibility': result.get('eligibility')}
+        ensure_approvals(task['id'], result['order_id'], payload['approval_chain'], session=s)
+        update_task(task['id'], status='waiting_approval', current_step='human_review', result=payload, session=s)
+        emit_event(task['id'], 'human_review_required', payload, session=s)
+        s.add(
+            TraceStep(
+                trace_id=task['trace_id'],
+                node='human_review',
+                status='waiting_approval',
+                latency_ms=0,
+                input_json=dumps({'intent': task['intent'], 'order_id': result.get('order_id')}),
+                output_json=dumps(payload),
+            )
+        )
+    return payload
+
+
+def _completed_payload(result):
+    return {
+        'status': 'completed',
+        'answer': result.get('answer'),
+        'ticket': result.get('ticket'),
+        'refund': result.get('refund'),
+        'risk': result.get('risk'),
+        'eligibility': result.get('eligibility'),
+    }
+
+
+def _mark_completed(task, result, current_step='done', payload=None):
+    payload = payload or _completed_payload(result)
     with session_scope() as s:
-        update_task(task['id'], status='completed', current_step='done', result=payload, session=s)
+        update_task(task['id'], status='completed', current_step=current_step, result=payload, session=s)
         emit_event(task['id'], 'task_completed', payload, session=s)
         s.add(
             AuditLog(
@@ -178,27 +302,66 @@ def process_task(task):
     return payload
 
 
-def resume_after_approval(task):
+def process_task(task):
+    p = task['payload']; state: ServiceState = {'task_id': task['id'], 'trace_id': task['trace_id'], 'tenant_id': task['tenant_id'], 'user_id': task['user_id'], 'role': p.get('role', 'customer'), 'intent': task['intent'], 'message': p['message'], 'order_id': p.get('order_id')}
+    with session_scope() as s:
+        update_task(task['id'], status='running', current_step='workflow', session=s)
+        emit_event(task['id'], 'workflow_start', {'intent': task['intent']}, session=s)
+
+    graph = _graph_for_execution()
+    if graph is None:
+        result = _fallback(state)
+    else:
+        result = graph.invoke(state, _config(task['id']))
+
+    if _interrupt_value(result) is not None or _needs_human_review(result):
+        return _mark_waiting(task, result)
+    return _mark_completed(task, result)
+
+
+def _approvals(task_id):
     with use_session() as s:
-        rows = [
+        return [
             row.to_dict()
             for row in s.scalars(
                 select(ApprovalRecord)
-                .where(ApprovalRecord.task_id == task['id'])
+                .where(ApprovalRecord.task_id == task_id)
                 .order_by(ApprovalRecord.sequence_no)
             )
         ]
-    if any(r['status'] == 'rejected' for r in rows):
-        payload = {'status': 'rejected', 'answer': '人工审核未通过，本次退款不会执行。'}
-        with session_scope() as s:
-            update_task(task['id'], status='completed', current_step='rejected', result=payload, session=s)
-            emit_event(task['id'], 'task_completed', payload, session=s)
-        return payload
+
+
+def _fallback_resume(task, approved):
+    if not approved:
+        return {'answer': REJECTION_MESSAGE, 'refund': None}
+    p = task['payload']; c = SecurityContext(task['user_id'], task['tenant_id'], p.get('role', 'customer'))
+    order = get_order(p['order_id'], c); refund = submit_refund(c, order, 'approved_high_value_refund')
+    return {'refund': refund, 'answer': f"人工审核已通过，退款 {float(refund['amount']):.2f} 元已提交，退款单号 {refund['external_refund_id']}。"}
+
+
+def resume_after_approval(task):
+    existing = get_task(task['id'])
+    if existing and existing['status'] == 'completed':
+        return existing['result']
+
+    rows = _approvals(task['id'])
+    approved = not any(r['status'] == 'rejected' for r in rows) and not any(r['status'] == 'pending' for r in rows)
     if any(r['status'] == 'pending' for r in rows):
-        update_task(task['id'], status='waiting_approval', current_step='human_review'); return {'status': 'waiting_approval'}
-    p = task['payload']; c = SecurityContext(task['user_id'], task['tenant_id'], p.get('role', 'customer')); order = get_order(p['order_id'], c); refund = submit_refund(c, order, 'approved_high_value_refund')
-    payload = {'status': 'completed', 'answer': f"人工审核已通过，退款 {float(refund['amount']):.2f} 元已提交，退款单号 {refund['external_refund_id']}。", 'refund': refund}
-    with session_scope() as s:
-        update_task(task['id'], status='completed', current_step='refund_submitted', result=payload, session=s)
-        emit_event(task['id'], 'task_completed', payload, session=s)
-    return payload
+        update_task(task['id'], status='waiting_approval', current_step='human_review')
+        return {'status': 'waiting_approval'}
+
+    graph = _graph_for_execution()
+    if graph is None:
+        result = _fallback_resume(task, approved)
+    else:
+        from langgraph.types import Command
+
+        decision = {'approved': approved, 'approvals': rows}
+        result = graph.invoke(Command(resume=decision), _config(task['id']))
+
+    if _interrupt_value(result) is not None:
+        return _mark_waiting(task, result)
+    if not approved:
+        payload = {'status': 'rejected', 'answer': result.get('answer') or REJECTION_MESSAGE, 'refund': None}
+        return _mark_completed(task, result, current_step='rejected', payload=payload)
+    return _mark_completed(task, result, current_step='refund_submitted')

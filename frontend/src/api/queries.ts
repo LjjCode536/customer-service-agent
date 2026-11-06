@@ -27,6 +27,7 @@ export const queryKeys = {
   evaluation: ['evaluation'] as const,
   badCases: ['bad-cases'] as const,
   traces: (traceId?: string) => ['traces', traceId ?? 'all'] as const,
+  tasks: ['task'] as const,
   task: (taskId?: string) => ['task', taskId ?? 'none'] as const,
 }
 
@@ -151,6 +152,7 @@ export function useDecideApproval() {
       void queryClient.invalidateQueries({ queryKey: queryKeys.approvals })
       void queryClient.invalidateQueries({ queryKey: queryKeys.dashboard })
       void queryClient.invalidateQueries({ queryKey: queryKeys.refunds })
+      void queryClient.invalidateQueries({ queryKey: queryKeys.tasks })
     },
   })
 }

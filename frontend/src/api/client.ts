@@ -35,6 +35,10 @@ function errorMessage(status: number, payload: unknown): string {
   if (payload && typeof payload === 'object' && 'detail' in payload) {
     return String((payload as { detail: unknown }).detail)
   }
+  if (typeof payload === 'string' && payload.trim()) {
+    // Non-JSON bodies (proxy HTML, gateway pages) are not useful verbatim.
+    return payload.trim().startsWith('<') ? `HTTP ${status}（服务返回非 JSON 响应）` : `HTTP ${status}: ${payload.slice(0, 160)}`
+  }
   return `HTTP ${status}`
 }
 
@@ -58,11 +62,15 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   })
 
   if (!response.ok) {
-    let payload: unknown
-    try {
-      payload = await response.json()
-    } catch {
-      payload = await response.text()
+    // Read the body once: a non-JSON error page (proxy/HTML) must not mask the status.
+    const raw = await response.text()
+    let payload: unknown = raw
+    if (raw) {
+      try {
+        payload = JSON.parse(raw)
+      } catch {
+        payload = raw
+      }
     }
     throw new ApiError(response.status, errorMessage(response.status, payload), payload)
   }

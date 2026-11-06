@@ -24,6 +24,7 @@ import Knowledge from './pages/Knowledge'
 import Traces from './pages/Traces'
 import Evaluation from './pages/Evaluation'
 import BadCases from './pages/BadCases'
+import NotFound from './pages/NotFound'
 
 const { Sider, Header, Content } = Layout
 
@@ -141,6 +142,7 @@ export default function App() {
             <Route path="/traces" element={<Traces />} />
             <Route path="/evaluation" element={<Evaluation />} />
             <Route path="/bad-cases" element={<BadCases />} />
+            <Route path="*" element={<NotFound />} />
           </Routes>
         </Content>
       </Layout>

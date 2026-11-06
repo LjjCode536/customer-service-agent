@@ -65,10 +65,11 @@
 - **Fallback**：LangGraph 不可用时的确定性降级路径，保持相同节点语义，仅用于测试与演示。
 - **Golden Dataset（黄金数据集）**：覆盖物流异常、低风险退款、高额退款、重复退款、VIP 投诉与 FAQ 的端到端评测用例。
 - **Evaluation Sandbox（评测沙箱）**：每次评测创建的临时 SQLite 数据库与临时 checkpoint，评测不读写业务库。
-- **Offline Provider**：Golden Dataset 使用的确定性离线 ModelProvider，Chat、Embedding、Rerank 都不访问网络。
+- **Offline Provider**：确定性的离线 ModelProvider，Chat、Embedding、Rerank 都不访问网络；用于 Golden Dataset 与无 key 的容器演示。
+- **Offline Mode（离线模式）**：显式设置 `MODEL_PROVIDER=offline` 的运行模式，检索与业务链路仍完整执行，但模型能力由确定性离线 Provider 提供；它不是 Mock Mode 的替代品。
 - **Bad Case（坏例）**：线上或评测中发现的失败样本，通过 `trace_id` 关联 Trace，记录错误类型、根因、期望结果与修复状态。
-- **Mock Mode**：默认演示模式，只模拟文本生成；检索与业务事实仍走真实链路。
+- **Mock Mode**：本地默认演示模式，只模拟文本生成；检索与业务事实仍走真实链路。Docker Compose 在无 key 时会显式改用 Offline Mode。
 
 ## 运营指标
 
-- **SLA Risk（SLA 风险）**：Open Ticket 相对 sla_due_at 的运营状态，分为 reached（已超时）、t_risk（临近超时，默认 60 分钟窗口）与 on_track（正常）。
+- **SLA Risk（SLA 风险）**：Open Ticket 相对 `sla_due_at` 的运营状态，分为 `breached`（已超时）、`at_risk`（临近超时，默认 60 分钟窗口）与 `on_track`（正常）。

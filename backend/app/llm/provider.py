@@ -219,8 +219,31 @@ class MockChatProvider:
         _close_provider(self._delegate)
 
 
+def _offline_requested(config: Settings) -> bool:
+    return config.model_provider.strip().lower() == 'offline'
+
+
 def describe_provider(config: Settings | None = None) -> dict:
     cfg = config or settings
+    if _offline_requested(cfg):
+        from app.llm.offline import OfflineProvider
+
+        return {
+            'provider': 'offline',
+            'base_url': '',
+            'models': {
+                'chat': OfflineProvider.chat_model,
+                'embedding': OfflineProvider.embedding_model,
+                'rerank': OfflineProvider.rerank_model,
+            },
+            'embedding_dimensions': cfg.model_embedding_dimensions,
+            'mock_boundary': {
+                'chat': 'offline',
+                'embedding': 'offline',
+                'rerank': 'offline',
+            },
+            'api_key_configured': False,
+        }
     chat_mode = 'mock' if cfg.mock_mode else 'live'
     return {
         'provider': cfg.model_provider,
@@ -238,6 +261,10 @@ def describe_provider(config: Settings | None = None) -> dict:
 
 def create_provider(config: Settings | None = None) -> ModelProvider:
     cfg = config or settings
+    if _offline_requested(cfg):
+        from app.llm.offline import OfflineProvider
+
+        return OfflineProvider(dimensions=cfg.model_embedding_dimensions)
     live = OpenAICompatibleProvider(
         name=cfg.model_provider,
         api_key=cfg.model_api_key,

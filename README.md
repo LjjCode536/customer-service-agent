@@ -2,7 +2,7 @@
 
 面向电商 / SaaS 售后场景的企业智能客服与工单 Agent：把**知识问答**、**实时业务查询**和**有副作用的退款/投诉流程**拆成三条路径，而不是把所有请求都塞进一个 LLM Agent Loop。
 
-> 状态：教学版基线重构中。`main` 当前为可运行的教学版，目标架构见 [Roadmap](#roadmap) 与 `docs/adr/`。
+> 状态：教学版重构已完成，`main` 为可运行、可演示、可测试的版本。阶段进度见 [Roadmap](#roadmap)，决策见 `docs/adr/`。
 
 ## 为什么不是普通 AI 客服 Demo
 
@@ -58,7 +58,7 @@ Chat、Embedding、Rerank 统一通过 `ModelProvider`（`backend/app/llm/provid
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `MOCK_MODE` | `true` | 只替换 Chat 输出；Embedding 与 Rerank 仍调用真实 Provider |
-| `MODEL_PROVIDER` | `siliconflow` | Provider 标签，仅用于展示与日志 |
+| `MODEL_PROVIDER` | `siliconflow` | Provider 选择：真实 OpenAI 兼容服务或显式 `offline` |
 | `MODEL_API_KEY` | 空 | 真实 Provider 必需；Chat / Embedding / Rerank 共用 |
 | `MODEL_BASE_URL` | `https://api.siliconflow.cn/v1` | OpenAI 兼容 base URL |
 | `MODEL_CHAT_MODEL` | `Qwen/Qwen3-8B` | Chat 模型 |
@@ -66,6 +66,8 @@ Chat、Embedding、Rerank 统一通过 `ModelProvider`（`backend/app/llm/provid
 | `MODEL_EMBEDDING_DIMENSIONS` | `1024` | Embedding 维度；返回向量维度不一致时显式报错 |
 | `MODEL_RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | Rerank 模型 |
 | `MODEL_TIMEOUT_SECONDS` | `60` | Provider 请求超时 |
+
+另有一个**显式的离线模式** `MODEL_PROVIDER=offline`：Chat、Embedding、Rerank 都由确定性 `OfflineProvider` 提供，不访问网络，适合没有 API key 的容器冒烟与 Golden Dataset。它不会静默替换真实 Provider；Docker Compose 在未设置 `MODEL_PROVIDER` 时使用该模式，填入真实 key 后仍走 SiliconFlow。
 
 切换到其他 OpenAI 兼容服务只需改环境变量。Chat 可以切到 DeepSeek：
 
@@ -77,7 +79,7 @@ MODEL_CHAT_MODEL=deepseek-chat
 
 但 DeepSeek 本身不提供 `/embeddings` 与 `/rerank`，因此 Embedding / Rerank 必须继续指向支持这两个端点的兼容服务（当前配置三者共用一个 base URL）。只切换 Chat 时，请在代码或部署侧保留原 Embedding / Rerank Provider。
 
-`GET /api/v1/runtime` 返回当前 Provider、三个模型名、Mock 边界、API key 是否配置、LangGraph 可用性、数据库路径与数据库类型。`mock_boundary` 表示是否模拟调用（`chat: mock`），不代表凭据一定可用；`api_key_configured=false` 时真实 Embedding / Rerank 会显式报错而不是返回伪造向量。测试通过 `set_provider()` 注入 fake Provider，不访问网络、不读取真实 key。
+`GET /api/v1/runtime` 返回当前 Provider、三个模型名、调用边界、API key 是否配置、LangGraph 可用性、数据库路径与数据库类型。`mock_boundary` 为 `chat: mock / embedding: live / rerank: live` 或全部 `offline`，不代表凭据一定可用；非离线模式下 `api_key_configured=false` 时真实 Embedding / Rerank 会显式报错而不是返回伪造向量。测试通过 `set_provider()` 注入 fake Provider，不访问网络、不读取真实 key。
 
 ## 混合检索
 
@@ -147,7 +149,11 @@ DATABASE_URL=postgresql://user:password@localhost:5432/customer_service
 | 高额退款 | `O10003` 12999 元 VIP 未发货 | 进入两级人工审核，Resume 后提交退款 |
 | 重复退款 | `O10004` 已有退款记录 | 返回 `DUPLICATE_REFUND_REQUEST`，不再创建 |
 | VIP 投诉 | `O10005` VIP 强投诉 | P1 工单，指派 `complaint_specialist` |
-| FAQ | 电子发票怎么开 | 走 RAG，返回当前有效版本 |
+| FAQ | 电子发票怎么开 | 走 RAG，引用当前有效版本《电子发票开具说明》 |
+
+这 6 个 Case 都出现在 Agent Lab 的 Mock Case 下拉框与 `backend/app/eval/golden_dataset.py`；`mock_data/*.json` 是 5 个业务 Case 的可读输入快照，运行时以 `backend/app/fixtures/mock_data.py` 与 Golden Dataset 为准。
+
+低风险退款等副作用 Case 在同一个数据库里只应成功一次；重复运行会命中幂等/`DUPLICATE_REFUND_REQUEST` 路径，这也是演示点。需要重置时执行 `python -m app.scripts_seed`，Docker 环境重启 API 容器即可重新 seed。
 
 ## Quickstart
 
@@ -196,11 +202,26 @@ npm run dev
 
 ## Docker Compose
 
+无 API key 也能直接启动：Compose 在 `MODEL_PROVIDER` 未设置时使用显式离线模式，运行完整 Router / Tool / Workflow / SSE 链路。
+
 ```bash
 docker compose up --build
 ```
 
-前端 `http://localhost:3000`，API `http://localhost:8000`。
+前端 `http://localhost:3000`，API `http://localhost:8000`，Swagger `http://localhost:8000/docs`。
+
+要使用真实 Embedding / Rerank，先准备 `.env`，再启动：
+
+```bash
+cp .env.example .env        # 填写 MODEL_API_KEY，保留 MODEL_PROVIDER=siliconflow
+docker compose up --build
+```
+
+PyPI 访问较慢时可以先执行 `docker compose build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple`，再 `docker compose up`。
+
+如果是从旧版本升级且数据库 schema 已变化，先执行 `docker compose down -v` 清空旧的 `service_data` volume（会同时清空演示数据），再重新启动。
+
+即使先执行了 `cp .env.example .env` 但没填 key，API / Worker 镜像入口也会在检测到 `MODEL_API_KEY` 为空时显式切换为 `MODEL_PROVIDER=offline` 并打印提示；填了 key 则继续使用 `.env` 中的真实 Provider。`scripts/start-mac.sh` 与 `scripts/start-windows.ps1` 在启动前做同样的判断。SQLite 数据库与 LangGraph checkpoint 放在 `service_data` volume；API 容器启动时会执行 `scripts_seed` 重建演示数据，因此重启后工单、退款与任务会回到 seed 状态，这是教学版的可重复演示取舍。
 
 ## 目录
 
@@ -246,22 +267,47 @@ approval / idempotency`。评测在临时 SQLite 沙箱和 `OfflineProvider` 中
 `trace_id` 过滤）、`GET /api/v1/bad-cases/{id}` 查询，`PATCH /api/v1/bad-cases/{id}`
 回填根因、期望结果和 `fixed` 状态。
 
+## 验证
+
+```bash
+cd backend && python -m pytest -q          # 123 个测试，含重复 Resume、越级 409、RAG 召回、预算终止
+cd frontend && npm ci && npm run build     # TypeScript 类型检查 + 生产构建
+curl http://localhost:8000/api/v1/evaluation   # 5 个核心 Case + FAQ 的端到端评测
+docker compose up --build                  # API / Worker / 前端
+```
+
 ## Roadmap
 
 - [x] 阶段 0：README、GLOSSARY、ADR、基线提交
-- [ ] 阶段 1：SQLAlchemy、SiliconFlow Provider、真 BM25 / Embedding / Rerank、SSE / 日志
-- [ ] 阶段 2：LangGraph 节点重构、interrupt + checkpointer、原子幂等
+- [x] 阶段 1：SQLAlchemy、SiliconFlow Provider、真 BM25 / Embedding / Rerank、SSE / Trace
+- [x] 阶段 2：LangGraph 节点重构、interrupt + checkpointer、原子幂等
 - [x] 阶段 3：只读 Agent Loop + 预算终止
 - [x] 阶段 4：Golden Dataset 端到端评测、Bad Case 闭环
-- [x] 阶段 5：前端 3 个重点页面
-- [ ] 阶段 6：测试补齐
+- [x] 阶段 5：前端 3 个重点页面 + 其余 6 页可用性
+- [x] 阶段 6：重复 Resume、越级 409、RAG 召回、预算终止等回归测试
 - [ ] 阶段 7：公网 Demo 与 CI（暂缓）
+
+## 后续部署计划
+
+当前版本定位为单机教学版，公网部署按以下顺序推进：
+
+1. 持久化：切换 Postgres，并把 LangGraph checkpointer 从 SQLite 换成 Postgres Saver，解除单 Worker 限制。
+2. 配置与密钥：由部署平台注入 `MODEL_API_KEY` 等变量，不把 `.env` 打进镜像；启动时不再自动 seed。
+3. 任务消费：单 Worker 循环替换为队列或多副本消费者，保留原子领取语义。
+4. CI：加入 `pytest -q`、`npm ci && npm run build`、`docker compose config` 与镜像构建；评测作为独立 job 运行。
+5. 入口：补 HTTPS、反向代理、限流与 CORS 白名单；SSE 继续关闭代理缓冲。
+6. 可观测性：接入结构化日志与指标，Trace / Audit 保持现有表结构。
 
 ## 已知限制
 
 - 教学版单租户、单 Worker，未做 RBAC 与多副本调度
-- SQLite 为默认存储；Postgres 通过 `DATABASE_URL` 切换
-- 公网部署暂缓，Docker Compose 保持可直接部署
+- SQLite 为默认存储；Postgres 通过 `DATABASE_URL` 切换。SQLite checkpointer 只适合单 Worker，多副本需换 Postgres checkpointer
+- Docker Compose 默认使用显式离线 Provider，便于无 key 启动；真实检索质量依赖 SiliconFlow 的可用性与免费额度
+- 没有 Alembic，修改已有表结构需要重建本地 SQLite 或手工迁移
+- Compose 启动会执行 seed 并重建演示数据，不能直接当作生产部署方案
+- 公网 Demo、HTTPS、域名与 GitHub Actions CI 暂缓；本地与 Compose 是当前验收路径
+- 退款网关为状态模拟，未对接真实支付/退款渠道
+- 评测验证业务链路与副作用，不评价真实模型的最终话术质量
 
 ## License
 

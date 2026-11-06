@@ -12,6 +12,7 @@ from app.llm.provider import (
     ProviderError,
     RerankResult,
     create_provider,
+    describe_provider,
     reset_provider,
     set_provider,
 )
@@ -119,6 +120,33 @@ def test_mock_chat_provider_passes_embedding_and_rerank_to_live_provider():
 
     assert provider.embed(['a', 'b']) == [[0.5, 0.25], [0.5, 0.25]]
     assert provider.rerank('q', ['doc-a', 'doc-b']) == live.rerank('q', ['doc-a', 'doc-b'])
+
+
+def test_offline_provider_is_explicit_and_never_needs_a_key():
+    config = Settings(
+        _env_file=None,
+        model_provider='offline',
+        model_api_key='',
+        model_embedding_dimensions=48,
+    )
+    provider = create_provider(config)
+
+    assert provider.name == 'offline'
+    assert provider.embedding_model == 'offline-embedding-v1'
+    first = provider.embed(['hello'])
+    assert len(first[0]) == 48
+    assert provider.embed(['hello']) == first
+    assert provider.rerank('hello', ['a', 'b'])[0].index == 0
+
+    runtime = describe_provider(config)
+    assert runtime['provider'] == 'offline'
+    assert runtime['mock_boundary'] == {
+        'chat': 'offline',
+        'embedding': 'offline',
+        'rerank': 'offline',
+    }
+    assert runtime['api_key_configured'] is False
+    assert runtime['models']['embedding'] == 'offline-embedding-v1'
 
 
 def test_openai_compatible_provider_speaks_chat_embedding_and_rerank():

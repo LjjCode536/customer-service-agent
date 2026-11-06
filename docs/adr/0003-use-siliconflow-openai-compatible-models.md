@@ -15,6 +15,7 @@
 - Rerank 模型：`BAAI/bge-reranker-v2-m3`，通过 `/v1/rerank` 调用。
 - DeepSeek 或其他兼容服务可通过环境变量切换，不写死供应商。
 - Mock Mode 只模拟文本生成；Embedding 与 Rerank 始终走真实 API。测试注入 fake provider，不访问网络。
+- 另设显式 `MODEL_PROVIDER=offline` 供无 key 的 Compose / 评测使用，详见 ADR-0007；它不改变 Mock Mode 的语义。
 
 ## Consequences
 

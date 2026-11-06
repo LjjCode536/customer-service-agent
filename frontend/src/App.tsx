@@ -14,6 +14,7 @@ import { Layout, Menu, Select, Segmented, Space, Tag, Typography } from 'antd'
 import { Link, Route, Routes, useLocation } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { useRuntimeInfo } from './api/queries'
+import type { RuntimeInfo } from './api/types'
 import { DEMO_ROLES, DEMO_TENANTS, DEMO_USERS, useRuntime } from './store/useRuntime'
 import Dashboard from './pages/Dashboard'
 import AgentLab from './pages/AgentLab'
@@ -39,6 +40,12 @@ const menus = [
   ['/evaluation', <ExperimentOutlined />, 'Evaluation'],
   ['/bad-cases', <WarningOutlined />, 'Bad Case'],
 ]
+
+function providerBadge(runtime?: RuntimeInfo) {
+  if (runtime?.provider === 'offline') return { color: 'gold', label: 'OFFLINE' }
+  if (runtime?.mock_mode) return { color: 'blue', label: 'MOCK CHAT' }
+  return { color: 'green', label: 'REAL CHAT' }
+}
 
 export default function App() {
   const [collapsed, setCollapsed] = useState(false)
@@ -93,9 +100,7 @@ export default function App() {
             </Typography.Text>
           </div>
           <Space wrap size={8}>
-            <Tag color={runtime?.mock_mode ? 'blue' : 'green'}>
-              {runtime?.mock_mode ? 'MOCK CHAT' : 'REAL CHAT'}
-            </Tag>
+            <Tag color={providerBadge(runtime).color}>{providerBadge(runtime).label}</Tag>
             <Tag color={runtime?.langgraph_available ? 'purple' : 'default'}>
               {runtime?.langgraph_available ? 'LangGraph' : 'Fallback'}
             </Tag>

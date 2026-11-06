@@ -1,20 +1,51 @@
 services:
   api:
-    build: ./backend
+    build:
+      context: ./backend
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
     working_dir: /app
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # The image entrypoint switches to the deterministic offline provider
+      # when MODEL_API_KEY is empty; a real key keeps the configured provider.
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-offline}
+      DATABASE_PATH: /app/data/customer_service.db
     volumes:
       - service_data:/app/data
     command: sh -c "python -m app.scripts_seed && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 30
     ports: ["8000:8000"]
   worker:
-    build: ./backend
+    build:
+      context: ./backend
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
     working_dir: /app
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-offline}
+      DATABASE_PATH: /app/data/customer_service.db
     volumes:
       - service_data:/app/data
-    depends_on: [api]
-    command: sh -c "sleep 2 && python -m app.worker"
+    depends_on:
+      api:
+        condition: service_healthy
+    command: sh -c "python -m app.worker"
   frontend:
     build: ./frontend
     depends_on: [api]

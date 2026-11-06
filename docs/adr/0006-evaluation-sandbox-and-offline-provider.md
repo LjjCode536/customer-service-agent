@@ -15,7 +15,8 @@ Eligibility、Risk、审批链、幂等与工单路由的回归。但评测不�
 - 数据库与 LangGraph checkpointer 都使用临时路径；通过 context-local 的
   `use_database_engine()` / `use_graph()` 覆盖，不修改进程级全局配置。
 - 用例使用 `app/llm/offline.py` 的 `OfflineProvider`，Chat、Embedding、Rerank 全部确定性离线实现；
-  Provider 边界仍然只有 ModelProvider 层。
+  Provider 边界仍然只有 ModelProvider 层。同一个 Provider 也可通过
+  `MODEL_PROVIDER=offline` 显式用于无 key 的 Compose 演示（ADR-0007）。
 - 评测直接调用与生产相同的 `dispatch_message()`、`run_once()`、`decide_approval()`，
   同步驱动 Task；不依赖 SSE，也不比较最终话术。
 - LangGraph 不可用时评测直接报错；只有显式 `WORKFLOW_ENGINE=fallback` 才使用确定性降级路径，

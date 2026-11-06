@@ -23,6 +23,9 @@ flowchart LR
     API --> R[Intent Router]
     R -->|FAQ| RAG[Hybrid RAG<br/>BM25 + BGE-M3 + RRF + Rerank]
     R -->|订单 / 物流| T[Business Tools<br/>Security Context 校验]
+    R -->|意图不明 / 多步只读查询| LOOP[Read-only Agent Loop<br/>max_steps / max_tool_calls / max_tokens]
+    LOOP --> T
+    LOOP --> RAG
     R -->|退款 / 投诉| TASK[Task + Event Store]
     TASK --> W[Worker]
     W --> G[LangGraph Workflow]
@@ -87,6 +90,33 @@ FAQ 请求走真实检索链路（`backend/app/rag/hybrid.py`）：
 5. 融合候选交给 BGE Reranker Cross-Encoder 精排，返回稳定排序的 Evidence。
 
 Evidence 包含 `title / version / content / bm25_score / vector_score / rrf_score / rerank_score` 以及两路排名。FAQ 响应同时返回 `citations` 和完整 `evidence`。Provider 失败时接口返回 503 或任务进入 failed，不会退回字符重合度或伪造向量。
+
+## 只读 Agent Loop
+
+`backend/app/services/agent_loop.py` 实现一个只读、有预算的 Agent Loop，用于意图不明确或多步只读查询。响应 `mode=agent_loop`，同时返回 `trace_id`、`stop_reason`、`handoff`、`steps`、`tool_calls`、`tokens_used` 与预算快照。
+
+**触发条件**（满足任一）：
+
+- Router 结果为 `chat`（无法归入 FAQ / 订单 / 物流 / 退款 / 投诉）；
+- Router 置信度低于 `AGENT_LOOP_CONFIDENCE_THRESHOLD`（默认 `0.7`）：规则命中的意图为 `0.98`，由模型猜测的意图只有 `0.6`，不可信的二次路由会回到 Loop；
+- 多步只读查询：带订单号，且同时包含业务事实与知识问题（例如“订单 O10001 到哪了，顺便问下发票怎么开”）。
+
+`refund` / `complaint` 永远不会进入 Loop，仍由 Rule Engine + LangGraph Workflow 处理。
+
+**只读边界**：Loop 的调度表只注册三个工具——`get_order`、`get_logistics`、`retrieve_knowledge`。`submit_refund`、`create_ticket` 或任何订单修改调用都会抛出 `AGENT_LOOP_TOOL_NOT_ALLOWED`，因此 Loop 不可能产生副作用。
+
+**预算与配置**：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `AGENT_LOOP_MAX_STEPS` | `4` | 最多执行多少个工具步骤 |
+| `AGENT_LOOP_MAX_TOOL_CALLS` | `6` | 最多工具调用次数 |
+| `AGENT_LOOP_MAX_TOKENS` | `1500` | token 预算（确定性估算，用于演示与测试） |
+| `AGENT_LOOP_CONFIDENCE_THRESHOLD` | `0.7` | Router 置信度低于该值时进入 Loop |
+
+**停止条件**：证据充分、无需继续查询时正常结束；预算耗尽（`budget_exhausted_steps / budget_exhausted_tool_calls / budget_exhausted_tokens`）、证据不足（`insufficient_evidence`）、工具失败（`tool_failure`）或用户明确要求转人工（`needs_human`）时立即终止，设置 `handoff=true` 并给出降级回答/转人工提示；意图不明确时返回澄清问题（`clarification`），打招呼则返回引导话术。响应 `status` 为 `completed`（证据充分）或 `degraded`（其余终止原因），真实异常不会混在 `error` 字段里返回。无论哪种终止，都不会继续循环，也不会在 Loop 内执行补偿性副作用。
+
+每个工具步骤写一条 Trace（`agent_loop.tool.get_order` / `agent_loop.tool.get_logistics` / `agent_loop.tool.retrieve_knowledge`），终止时写 `agent_loop.stop`，可通过 `GET /api/v1/traces?trace_id=<trace_id>` 按链路回放。订单归属校验失败仍保持 `403`、订单不存在保持 `404`，与直连 Tool 路径一致，不会被当作普通工具失败吞掉。`GET /api/v1/runtime` 也会返回当前预算与允许的工具列表。
 
 ## 持久化
 
@@ -195,7 +225,7 @@ mock_data/        # 演示输入
 - [x] 阶段 0：README、GLOSSARY、ADR、基线提交
 - [ ] 阶段 1：SQLAlchemy、SiliconFlow Provider、真 BM25 / Embedding / Rerank、SSE / 日志
 - [ ] 阶段 2：LangGraph 节点重构、interrupt + checkpointer、原子幂等
-- [ ] 阶段 3：只读 Agent Loop + 预算终止
+- [x] 阶段 3：只读 Agent Loop + 预算终止
 - [ ] 阶段 4：Golden Dataset 端到端评测、Bad Case 闭环
 - [ ] 阶段 5：前端 3 个重点页面
 - [ ] 阶段 6：测试补齐

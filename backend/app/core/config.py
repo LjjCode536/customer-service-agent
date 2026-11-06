@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     model_embedding_dimensions: int = 1024
     model_rerank_model: str = 'BAAI/bge-reranker-v2-m3'
     model_timeout_seconds: int = 60
+    # Read-only Agent Loop budget; intent=chat or low router confidence enters it.
+    agent_loop_max_steps: int = 4
+    agent_loop_max_tool_calls: int = 6
+    agent_loop_max_tokens: int = 1500
+    agent_loop_confidence_threshold: float = 0.7
     model_config = SettingsConfigDict(env_file=('../.env','.env'), env_file_encoding='utf-8', extra='ignore')
 
     @property

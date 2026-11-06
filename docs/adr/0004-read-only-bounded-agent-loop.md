@@ -9,7 +9,8 @@
 
 ## Decision
 
-- 仅在 `intent=chat` 或 Router 置信度低于阈值时启用 Agent Loop。
+- 仅在 `intent=chat`、Router 置信度低于阈值，或多步只读查询时启用 Agent Loop。
+- 多步只读查询指带订单号且同时需要业务事实与知识检索的请求；`refund` / `complaint` 永不进入 Loop。
 - Loop 只允许只读工具：`get_order`、`get_logistics`、`retrieve_knowledge`。
 - 不允许在 Loop 内创建工单、发起退款或修改订单。
 - 预算：`max_steps=4`、`max_tool_calls=6`、`max_tokens` 上限。

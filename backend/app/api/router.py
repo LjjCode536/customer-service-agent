@@ -13,6 +13,11 @@ from app.db.models import ApprovalRecord, BadCase, Knowledge, RefundRequest, Tas
 from app.fixtures.mock_data import MOCK_CASES
 from app.llm.provider import ProviderError, describe_provider
 from app.rag.hybrid import retrieve
+from app.services.agent_loop import (
+    READ_ONLY_TOOL_NAMES,
+    run_agent_loop,
+    should_use_agent_loop,
+)
 from app.services.router import route_intent
 from app.services.tasking import create_task, get_task, list_events, record_audit
 from app.services.tools import create_ticket, get_customer, get_logistics, get_order
@@ -37,6 +42,13 @@ def runtime():
         'checkpoint_path': settings.checkpoint_file,
         'database': database_url,
         'database_type': engine.dialect.name,
+        'agent_loop': {
+            'max_steps': settings.agent_loop_max_steps,
+            'max_tool_calls': settings.agent_loop_max_tool_calls,
+            'max_tokens': settings.agent_loop_max_tokens,
+            'confidence_threshold': settings.agent_loop_confidence_threshold,
+            'allowed_tools': list(READ_ONLY_TOOL_NAMES),
+        },
     }
 
 
@@ -57,7 +69,15 @@ def chat(body: ChatRequest, ctx: SecurityContext = Depends(get_security_context)
 
 
 def _chat(body, ctx):
-    r = route_intent(body.message); intent = r['intent']; oid = r.get('order_id')
+    r = route_intent(body.message)
+    if should_use_agent_loop(r, body.message):
+        try:
+            return run_agent_loop(body.message, ctx, intent=r['intent'])
+        except PermissionError as e:
+            raise HTTPException(403, str(e))
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+    intent = r['intent']; oid = r.get('order_id')
     if intent == 'faq':
         try:
             docs = retrieve(body.message, top_n=3)
@@ -65,8 +85,6 @@ def _chat(body, ctx):
             raise HTTPException(503, str(exc)) from exc
         answer = docs[0]['content'] if docs else '当前知识库没有足够依据。'
         return {'mode': 'direct_rag', 'intent': intent, 'answer': answer, 'citations': [{'title': x['title'], 'version': x['version']} for x in docs], 'evidence': docs}
-    if intent == 'chat':
-        return {'mode': 'chat', 'intent': intent, 'answer': '你好，我可以帮你查询订单、物流、退款政策或创建售后工单。'}
     if not oid: raise HTTPException(400, '请提供订单号，例如 O10001')
     try:
         if intent == 'order_query': return {'mode': 'direct_tool', 'intent': intent, 'order': get_order(oid, ctx)}
@@ -257,9 +275,12 @@ def knowledge():
 
 
 @router.get('/traces')
-def traces(limit: int = 300):
+def traces(limit: int = 300, trace_id: str | None = None):
     with session_scope() as s:
-        rows = [row.to_dict() for row in s.scalars(select(TraceStep).order_by(TraceStep.id.desc()).limit(min(limit, 1000)))]
+        query = select(TraceStep).order_by(TraceStep.id.desc()).limit(min(limit, 1000))
+        if trace_id:
+            query = query.where(TraceStep.trace_id == trace_id)
+        rows = [row.to_dict() for row in s.scalars(query)]
     for r in rows:
         r['input'] = loads(r.pop('input_json', '{}'), {})
         r['output'] = loads(r.pop('output_json', '{}'), {})

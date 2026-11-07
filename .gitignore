@@ -55,6 +55,9 @@ pnpm-debug.log*
 backend/data/*
 !backend/data/.gitkeep
 
+# Evaluation runner report artifacts
+backend/evaluation_out.json
+
 # ---------------------------------------------------------------------------
 # OS / IDE / editor
 # ---------------------------------------------------------------------------

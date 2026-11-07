@@ -6,7 +6,6 @@ from fastapi.testclient import TestClient
 from langgraph.types import Command
 from sqlalchemy import select
 
-import app.workflow.service_graph as service_graph
 from app.core.config import settings
 from app.core.security import SecurityContext
 from app.db.database import loads, session_scope
@@ -14,6 +13,7 @@ from app.db.models import AuditLog
 from app.main import app
 from app.services.tasking import create_task, list_events, update_task
 from app.worker import run_once
+from app.workflow import service_graph
 
 LOW_RISK_NODES = {
     'load_customer',

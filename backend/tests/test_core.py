@@ -1,5 +1,6 @@
 from app.services.router import route_intent
-from app.services.rules import refund_eligibility,refund_risk
+from app.services.rules import refund_eligibility, refund_risk
+
 
 def test_router():
     assert route_intent('订单 O10001 物流两天没更新')['intent']=='logistics_query'

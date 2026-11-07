@@ -1,0 +1,21 @@
+# CI-only overlay, layered by .github/workflows/ci.yml:
+#   docker compose -f docker-compose.yml -f .github/compose.ci.yml build
+# Adds BuildKit GitHub Actions cache backends without changing local behavior.
+#
+# api and worker share the same Dockerfile and context, so only api exports
+# cache; worker dedupes against api's layers inside the same BuildKit session.
+services:
+  api:
+    build:
+      cache_from:
+        - type=gha,scope=backend
+      cache_to:
+        - type=gha,mode=max,scope=backend
+  worker:
+    build: {}
+  frontend:
+    build:
+      cache_from:
+        - type=gha,scope=frontend
+      cache_to:
+        - type=gha,mode=max,scope=frontend

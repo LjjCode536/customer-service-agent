@@ -1,8 +1,8 @@
 import json
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import datetime, timezone
-from typing import Iterator
+from datetime import UTC, datetime
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
@@ -15,7 +15,7 @@ from app.core.context import scoped
 
 def utcnow() -> datetime:
     """Naive UTC, matching SQLite/Postgres CURRENT_TIMESTAMP defaults."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def dumps(v):
@@ -27,7 +27,7 @@ def loads(v, default=None):
         return default
     try:
         return json.loads(v)
-    except Exception:
+    except Exception:  # noqa: BLE001  # corrupted or non-JSON storage intentionally falls back to default
         return default
 
 

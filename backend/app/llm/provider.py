@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from threading import Lock
-from typing import Iterator, Protocol, Sequence
+from typing import Protocol
 
 import httpx
 from langchain_core.messages import HumanMessage, SystemMessage

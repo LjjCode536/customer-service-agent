@@ -1,9 +1,13 @@
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.router import router
 from app.core.config import settings
 from app.db.schema import init_schema
-from app.api.router import router
+
+
 @asynccontextmanager
 async def lifespan(app): init_schema(); yield
 app=FastAPI(title='Enterprise Customer Service & Ticket Agent',version='1.0.0',lifespan=lifespan)

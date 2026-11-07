@@ -8,16 +8,23 @@ Rule Engine + Workflow path. Every step is written to Trace.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Any
 
 from app.core.config import settings
 from app.core.security import SecurityContext
 from app.rag.hybrid import retrieve
 from app.services.router import (
     KNOWLEDGE_KEYWORDS as ROUTER_KNOWLEDGE_KEYWORDS,
+)
+from app.services.router import (
     LOGISTICS_KEYWORDS as ROUTER_LOGISTICS_KEYWORDS,
+)
+from app.services.router import (
     ORDER_KEYWORDS as ROUTER_ORDER_KEYWORDS,
+)
+from app.services.router import (
     extract_order_id,
 )
 from app.services.tasking import new_id, record_trace
@@ -70,7 +77,7 @@ class AgentBudget:
     max_tokens: int
 
     @classmethod
-    def from_settings(cls) -> 'AgentBudget':
+    def from_settings(cls) -> AgentBudget:
         return cls(
             max_steps=settings.agent_loop_max_steps,
             max_tool_calls=settings.agent_loop_max_tool_calls,

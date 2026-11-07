@@ -17,7 +17,6 @@ os.environ['DATABASE_URL'] = ''
 @pytest.fixture()
 def fake_provider():
     from app.llm.provider import reset_provider, set_provider
-
     from tests.fakes import DeterministicProvider
 
     provider = DeterministicProvider()

@@ -270,7 +270,7 @@ approval / idempotency`。评测在临时 SQLite 沙箱和 `OfflineProvider` 中
 ## 验证
 
 ```bash
-cd backend && python -m pytest -q          # 123 个测试，含重复 Resume、越级 409、RAG 召回、预算终止
+cd backend && python -m pytest -q          # 127 个测试，含重复 Resume、越级 409、RAG 召回、预算终止
 cd frontend && npm ci && npm run build     # TypeScript 类型检查 + 生产构建
 curl http://localhost:8000/api/v1/evaluation   # 5 个核心 Case + FAQ 的端到端评测
 docker compose up --build                  # API / Worker / 前端
@@ -285,7 +285,8 @@ docker compose up --build                  # API / Worker / 前端
 - [x] 阶段 4：Golden Dataset 端到端评测、Bad Case 闭环
 - [x] 阶段 5：前端 3 个重点页面 + 其余 6 页可用性
 - [x] 阶段 6：重复 Resume、越级 409、RAG 召回、预算终止等回归测试
-- [ ] 阶段 7：公网 Demo 与 CI（暂缓）
+- [x] 阶段 7：最小 CI（GitHub Actions：ruff、pytest、前端构建、compose 镜像构建，PR 与 main 触发）
+- [ ] 阶段 8：公网 Demo 与 HTTPS（暂缓）
 
 ## 后续部署计划
 
@@ -294,7 +295,7 @@ docker compose up --build                  # API / Worker / 前端
 1. 持久化：切换 Postgres，并把 LangGraph checkpointer 从 SQLite 换成 Postgres Saver，解除单 Worker 限制。
 2. 配置与密钥：由部署平台注入 `MODEL_API_KEY` 等变量，不把 `.env` 打进镜像；启动时不再自动 seed。
 3. 任务消费：单 Worker 循环替换为队列或多副本消费者，保留原子领取语义。
-4. CI：加入 `pytest -q`、`npm ci && npm run build`、`docker compose config` 与镜像构建；评测作为独立 job 运行。
+4. CI：已上线最小 CI（`.github/workflows/ci.yml`：ruff、pytest、`npm ci && npm run build`、compose 镜像构建）；评测作为独立 job 后续补上。
 5. 入口：补 HTTPS、反向代理、限流与 CORS 白名单；SSE 继续关闭代理缓冲。
 6. 可观测性：接入结构化日志与指标，Trace / Audit 保持现有表结构。
 
@@ -305,7 +306,7 @@ docker compose up --build                  # API / Worker / 前端
 - Docker Compose 默认使用显式离线 Provider，便于无 key 启动；真实检索质量依赖 SiliconFlow 的可用性与免费额度
 - 没有 Alembic，修改已有表结构需要重建本地 SQLite 或手工迁移
 - Compose 启动会执行 seed 并重建演示数据，不能直接当作生产部署方案
-- 公网 Demo、HTTPS、域名与 GitHub Actions CI 暂缓；本地与 Compose 是当前验收路径
+- 公网 Demo、HTTPS 与域名暂缓；本地与 Compose 是当前验收路径（lint / 测试 / 构建已由 GitHub Actions 在 PR 上验证）
 - 退款网关为状态模拟，未对接真实支付/退款渠道
 - 评测验证业务链路与副作用，不评价真实模型的最终话术质量
 

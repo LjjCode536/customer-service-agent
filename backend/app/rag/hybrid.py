@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, time, timezone
-from typing import Any, Sequence
+from collections.abc import Sequence
+from datetime import UTC, date, datetime, time
+from typing import Any
 
 import jieba
 import numpy as np
@@ -176,7 +177,8 @@ def _parse_effective_from(value: str | None) -> datetime | None:
         return None
     text = str(value).strip()
     try:
-        parsed = datetime.fromisoformat(text.replace('Z', '+00:00'))
+        # Python 3.11+ fromisoformat parses a trailing 'Z' directly.
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         try:
             parsed_date = date.fromisoformat(text)
@@ -184,7 +186,7 @@ def _parse_effective_from(value: str | None) -> datetime | None:
             return None
         return datetime.combine(parsed_date, time.min)
     if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
     return parsed
 
 

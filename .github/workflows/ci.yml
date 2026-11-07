@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend (ruff + pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install dependencies
+        run: python -m pip install -r backend/requirements.txt
+      - name: Lint (ruff)
+        # Same working directory as local verification: ruff's project root
+        # (and thus first-party import classification) follows the CWD.
+        run: python -m ruff check .
+        working-directory: backend
+      - name: Test (pytest)
+        run: python -m pytest -q
+        working-directory: backend
+
+  frontend:
+    name: frontend (npm ci + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+
+  docker:
+    name: docker (compose build)
+    runs-on: ubuntu-latest
+    # Draft PRs keep the fast lint/test feedback; the slow image build reads only finished PRs.
+    if: ${{ github.event_name == 'push' || !github.event.pull_request.draft }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Validate compose config
+        run: docker compose config -q
+      - name: Build images
+        # The CI overlay adds BuildKit gha cache backends; the base compose file stays
+        # untouched so local `docker compose build` keeps its plain behavior.
+        run: docker compose -f docker-compose.yml -f .github/compose.ci.yml build
+        env:
+          COMPOSE_BAKE: 'true'

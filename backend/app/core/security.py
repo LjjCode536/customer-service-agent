@@ -1,5 +1,7 @@
 from dataclasses import dataclass
+
 from fastapi import Header
+
 
 @dataclass
 class SecurityContext:

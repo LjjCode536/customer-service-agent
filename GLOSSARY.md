@@ -47,7 +47,7 @@
 
 ## 模型接入
 
-- **ModelProvider（模型 Provider）**：统一暴露 Chat、Embedding、Rerank 三个能力的接入层；默认指向 OpenAI 兼容的硅基流动端点，可通过环境变量切换。
+- **ModelProvider（模型 Provider）**：统一暴露 Chat、Embedding、Rerank 三个能力的接入层；Chat 与 Embedding 通过 LangChain（`langchain-openai` 的 ChatOpenAI / OpenAIEmbeddings）接入 OpenAI 兼容的硅基流动端点，Rerank 因非 OpenAI 标准端点保留 httpx 直连，可通过环境变量切换（详见 ADR-0003 与 ADR-0008）。
 - **Mock Boundary（Mock 边界）**：Mock Mode 下只有 Chat 输出被替换，Embedding、Rerank 与业务事实仍走真实链路；边界以 Provider 层为唯一实现点。
 
 ## 任务运行时

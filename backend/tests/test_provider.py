@@ -3,10 +3,13 @@ import json
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from langchain_core.embeddings import DeterministicFakeEmbedding
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
 from app.core.config import Settings
 from app.llm.provider import (
     MOCK_CHAT_REPLY,
+    LangChainProvider,
     MockChatProvider,
     OpenAICompatibleProvider,
     ProviderError,
@@ -147,6 +150,105 @@ def test_offline_provider_is_explicit_and_never_needs_a_key():
     }
     assert runtime['api_key_configured'] is False
     assert runtime['models']['embedding'] == 'offline-embedding-v1'
+
+
+def _fake_rerank_handler(request):
+    assert request.url.path.endswith('/rerank')
+    return httpx.Response(
+        200,
+        json={
+            'results': [
+                {'index': 0, 'relevance_score': 0.2},
+                {'index': 1, 'relevance_score': 0.9},
+            ]
+        },
+    )
+
+
+def test_create_provider_uses_langchain_access_layer():
+    live_config = Settings(_env_file=None, mock_mode=False)
+    provider = create_provider(live_config)
+    assert isinstance(provider, LangChainProvider)
+    assert provider.chat_model == 'Qwen/Qwen3-8B'
+    assert provider.embedding_model == 'BAAI/bge-m3'
+    assert provider.embedding_dimensions == 1024
+    assert provider.rerank_model == 'BAAI/bge-reranker-v2-m3'
+
+    mock_config = Settings(_env_file=None, mock_mode=True)
+    wrapped = create_provider(mock_config)
+    from app.llm.provider import MockChatProvider as MockLayer
+    assert isinstance(wrapped, MockLayer)
+    assert isinstance(wrapped._delegate, LangChainProvider)
+
+
+def test_langchain_provider_speaks_chat_embedding_and_rerank():
+    provider = LangChainProvider(
+        name='siliconflow',
+        api_key='test-key',
+        base_url='https://example.test/v1',
+        chat_model='chat-model',
+        embedding_model='embedding-model',
+        embedding_dimensions=3,
+        rerank_model='rerank-model',
+        timeout_seconds=5,
+        chat_model_instance=FakeListChatModel(responses=['hello']),
+        embedding_instance=DeterministicFakeEmbedding(size=3),
+        transport=httpx.MockTransport(_fake_rerank_handler),
+    )
+
+    assert provider.chat('系统', '用户') == 'hello'
+    assert provider.chat('系统', '用户') == 'hello'
+
+    vectors = provider.embed(['a', 'b'])
+    assert len(vectors) == 2
+    assert all(len(vector) == 3 for vector in vectors)
+
+    assert [(result.index, result.score) for result in provider.rerank('q', ['d0', 'd1'])] == [
+        (1, 0.9),
+        (0, 0.2),
+    ]
+    assert provider.rerank('q', []) == []
+    assert provider.embed([]) == []
+
+
+def test_langchain_provider_validates_embedding_dimensions():
+    provider = LangChainProvider(
+        name='siliconflow',
+        api_key='test-key',
+        base_url='https://example.test/v1',
+        chat_model='chat-model',
+        embedding_model='embedding-model',
+        embedding_dimensions=2,
+        rerank_model='rerank-model',
+        timeout_seconds=5,
+        embedding_instance=DeterministicFakeEmbedding(size=3),
+    )
+
+    with pytest.raises(ProviderError, match='MODEL_EMBEDDING_DIMENSIONS=2'):
+        provider.embed(['hello'])
+
+
+def test_langchain_provider_requires_api_key():
+    provider = LangChainProvider(
+        name='siliconflow',
+        api_key='',
+        base_url='https://example.test/v1',
+        chat_model='chat-model',
+        embedding_model='embedding-model',
+        embedding_dimensions=2,
+        rerank_model='rerank-model',
+        timeout_seconds=5,
+        chat_model_instance=FakeListChatModel(responses=['hello']),
+        embedding_instance=DeterministicFakeEmbedding(size=2),
+        transport=httpx.MockTransport(_fake_rerank_handler),
+    )
+
+    with pytest.raises(ProviderError, match='MODEL_API_KEY'):
+        provider.chat('system', 'user')
+    with pytest.raises(ProviderError, match='MODEL_API_KEY'):
+        provider.embed(['hello'])
+    with pytest.raises(ProviderError, match='MODEL_API_KEY'):
+        provider.rerank('hello', ['world'])
 
 
 def test_openai_compatible_provider_speaks_chat_embedding_and_rerank():

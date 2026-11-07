@@ -7,6 +7,8 @@ from threading import Lock
 from typing import Iterator, Protocol, Sequence
 
 import httpx
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 from app.core.config import Settings, settings
 from app.core.context import scoped
@@ -49,7 +51,159 @@ class ModelProvider(Protocol):
     ) -> list[RerankResult]: ...
 
 
+class LangChainProvider:
+    """LangChain 接入层：Chat 与 Embedding 走 langchain-openai，Rerank 走 /rerank。
+
+    硅基流动是 OpenAI 兼容端点，Chat 用 `ChatOpenAI`，Embedding 用
+    `OpenAIEmbeddings`（关闭 tiktoken 上下文切分，避免对非 OpenAI 模型做错误的
+    客户端分词）；`/v1/rerank` 不是 OpenAI 标准端点，LangChain 没有对应实现，故
+    保留最小 httpx 调用。测试通过注入 langchain-core 的 fake 模型实例，不访问网络。
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        api_key: str,
+        base_url: str,
+        chat_model: str,
+        embedding_model: str,
+        embedding_dimensions: int = 1024,
+        rerank_model: str,
+        timeout_seconds: int,
+        transport: httpx.BaseTransport | None = None,
+        chat_model_instance=None,
+        embedding_instance=None,
+    ):
+        self.name = name
+        self.api_key = api_key
+        self.base_url = base_url.rstrip('/')
+        self.chat_model = chat_model
+        self.embedding_model = embedding_model
+        self.embedding_dimensions = embedding_dimensions
+        self.rerank_model = rerank_model
+        self._client = httpx.Client(timeout=timeout_seconds, transport=transport)
+        if chat_model_instance is not None:
+            self._chat = chat_model_instance
+        else:
+            # openai>=2.x 会在构造 client 时立刻校验 api_key；这里用占位值绕过，
+            # 真正缺失 key 时的清晰报错由 _require_api_key() 在发起调用前给出。
+            placeholder_key = api_key or 'unconfigured'
+            self._chat = ChatOpenAI(
+                model=chat_model,
+                api_key=placeholder_key,
+                base_url=base_url,
+                timeout=timeout_seconds,
+            )
+        if embedding_instance is not None:
+            self._embeddings = embedding_instance
+        else:
+            self._embeddings = OpenAIEmbeddings(
+                model=embedding_model,
+                api_key=api_key or 'unconfigured',
+                base_url=base_url,
+                timeout=timeout_seconds,
+                check_embedding_ctx_length=False,
+            )
+
+    def close(self) -> None:
+        self._client.close()
+
+    def _require_api_key(self) -> None:
+        if not self.api_key:
+            raise ProviderError(
+                'MODEL_API_KEY 未配置：真实 Provider 的 Chat / Embedding / Rerank 需要 API key。'
+            )
+
+    def _post(self, path: str, payload: dict) -> dict:
+        try:
+            response = self._client.post(
+                f'{self.base_url}{path}',
+                headers={
+                    'Authorization': f'Bearer {self.api_key}',
+                    'Content-Type': 'application/json',
+                },
+                json=payload,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise ProviderError(f'{self.name} 调用 {path} 失败：{exc}') from exc
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise ProviderError(f'{self.name} 调用 {path} 返回了非 JSON 响应。') from exc
+
+    def chat(
+        self,
+        system: str,
+        user: str,
+        *,
+        temperature: float = 0.2,
+        mock_response: str | None = None,
+    ) -> str:
+        self._require_api_key()
+        try:
+            result = self._chat.bind(temperature=temperature).invoke(
+                [SystemMessage(content=system), HumanMessage(content=user)]
+            )
+        except Exception as exc:
+            raise ProviderError(f'{self.name} 的 Chat 调用失败：{exc}') from exc
+        content = getattr(result, 'content', result)
+        return str(content)
+
+    def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        self._require_api_key()
+        if not texts:
+            return []
+        try:
+            vectors = [list(vector) for vector in self._embeddings.embed_documents(list(texts))]
+        except Exception as exc:
+            raise ProviderError(f'{self.name} 的 Embedding 调用失败：{exc}') from exc
+        for vector in vectors:
+            if len(vector) != self.embedding_dimensions:
+                raise ProviderError(
+                    f'{self.name} 的 Embedding 维度为 {len(vector)}，与配置的 '
+                    f'MODEL_EMBEDDING_DIMENSIONS={self.embedding_dimensions} 不一致。'
+                )
+        return vectors
+
+    def rerank(
+        self,
+        query: str,
+        documents: Sequence[str],
+        *,
+        top_n: int | None = None,
+    ) -> list[RerankResult]:
+        self._require_api_key()
+        if not documents:
+            return []
+        payload = {
+            'model': self.rerank_model,
+            'query': query,
+            'documents': list(documents),
+        }
+        if top_n is not None:
+            payload['top_n'] = top_n
+        data = self._post('/rerank', payload)
+        try:
+            results = [
+                RerankResult(
+                    index=int(row['index']),
+                    score=float(row['relevance_score'] if 'relevance_score' in row else row['score']),
+                )
+                for row in data['results']
+            ]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProviderError(f'{self.name} 的 Rerank 响应缺少 results[].relevance_score。') from exc
+        results.sort(key=lambda result: result.score, reverse=True)
+        return results[:top_n] if top_n is not None else results
+
+
 class OpenAICompatibleProvider:
+    # [已弃用] 旧的手写 OpenAI 兼容实现，已被上面的 LangChainProvider（langchain-openai
+    # 接入）替代；create_provider() 不再引用它。按约定保留不删，回滚时把
+    # create_provider() 中的 LangChainProvider(...) 换回本类即可，测试
+    # test_openai_compatible_provider_speaks_chat_embedding_and_rerank 仍验证其行为。
     """OpenAI 兼容 Provider：Chat / Embedding 走标准端点，Rerank 走 /rerank。"""
 
     def __init__(
@@ -265,7 +419,7 @@ def create_provider(config: Settings | None = None) -> ModelProvider:
         from app.llm.offline import OfflineProvider
 
         return OfflineProvider(dimensions=cfg.model_embedding_dimensions)
-    live = OpenAICompatibleProvider(
+    live = LangChainProvider(
         name=cfg.model_provider,
         api_key=cfg.model_api_key,
         base_url=cfg.model_base_url,

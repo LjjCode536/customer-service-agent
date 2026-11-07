@@ -1,4 +1,6 @@
 import re
+from contextlib import suppress
+
 from app.llm.provider import get_provider
 
 # Shared vocabulary: the Intent Router and the read-only Agent Loop must not drift apart.
@@ -18,7 +20,7 @@ def route_intent(text: str) -> dict:
     elif any(x in t for x in KNOWLEDGE_KEYWORDS): intent='faq'
     else: intent='chat'; confidence=0.65
     if intent=='chat':
-        try:
+        with suppress(Exception):
             ans=get_provider().chat('只返回 faq/order_query/logistics_query/refund/complaint/chat 之一。','用户问题：'+text)
             for name in ['faq','order_query','logistics_query','refund','complaint','chat']:
                 if name in ans:
@@ -27,5 +29,4 @@ def route_intent(text: str) -> dict:
                     intent=name
                     confidence=0.6 if name!='chat' else 0.65
                     break
-        except Exception: pass
     return {'intent':intent,'order_id':order_id,'confidence':confidence}

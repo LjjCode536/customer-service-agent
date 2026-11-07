@@ -1,4 +1,5 @@
 import asyncio
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func, select
@@ -50,7 +51,7 @@ def runtime():
         import langgraph
         import langgraph.checkpoint.sqlite  # noqa: F401
         lg = True
-    except Exception:
+    except Exception:  # noqa: BLE001  # optional-dependency probe: any import failure means unavailable
         lg = False
     database_url = make_url(settings.sqlalchemy_url).render_as_string(hide_password=True)
     return {
@@ -83,8 +84,10 @@ def run_mock(body: MockCaseRequest):
     return _chat(ChatRequest(message=c['message']), ctx)
 
 
+SecurityContextDep = Annotated[SecurityContext, Depends(get_security_context)]
+
 @router.post('/chat')
-def chat(body: ChatRequest, ctx: SecurityContext = Depends(get_security_context)): return _chat(body, ctx)
+def chat(body: ChatRequest, ctx: SecurityContextDep): return _chat(body, ctx)
 
 
 def _chat(body, ctx):

@@ -1,8 +1,7 @@
-from fastapi.testclient import TestClient
 import pytest
+from fastapi.testclient import TestClient
 from langgraph.types import Command
 
-import app.workflow.service_graph as service_graph
 from app.core.config import settings
 from app.core.security import SecurityContext
 from app.db.database import session_scope
@@ -10,6 +9,7 @@ from app.db.models import Order
 from app.main import app
 from app.services.tasking import create_task, get_task
 from app.worker import run_once
+from app.workflow import service_graph
 from app.workflow.checkpointer import create_checkpointer
 
 

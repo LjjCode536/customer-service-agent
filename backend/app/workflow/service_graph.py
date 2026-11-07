@@ -1,6 +1,7 @@
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Iterator, TypedDict
+from typing import Any, TypedDict
 
 from sqlalchemy import func, select
 
@@ -282,7 +283,7 @@ def compile_graph(checkpointer=None):
 def _build_graph():
     try:
         return compile_graph()
-    except Exception:
+    except Exception:  # noqa: BLE001  # optional-dependency boundary: absence degrades to None, never crashes import
         # LangGraph (or its SQLite checkpointer) is unavailable. process_task refuses to
         # silently downgrade unless WORKFLOW_ENGINE=fallback is set explicitly.
         return None

@@ -1,6 +1,7 @@
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Iterator, TypeVar
+from typing import TypeVar
 
 T = TypeVar('T')
 

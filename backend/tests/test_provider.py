@@ -46,7 +46,14 @@ def _reset_provider():
     reset_provider()
 
 
-def test_runtime_exposes_provider_models_and_mock_boundary():
+def test_runtime_exposes_provider_models_and_mock_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The runtime endpoint must not depend on a developer's local .env
+    # (which may flip MOCK_MODE); pin the expected default explicitly.
+    from app.core.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, 'mock_mode', True)
     with TestClient(app) as client:
         response = client.get('/api/v1/runtime')
 

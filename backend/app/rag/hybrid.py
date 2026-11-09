@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from app.core.config import settings
 from app.db.database import loads, use_session, utcnow
-from app.db.models import Knowledge
+from app.db.models import Document, DocumentVersion, Knowledge
 from app.llm.provider import ModelProvider, ProviderError, get_provider
 
 RRF_K = 60
@@ -43,42 +43,105 @@ def knowledge_text(row: Knowledge | dict[str, Any]) -> str:
     )
 
 
+def _cache_embeddings(
+    rows: Sequence[Any],
+    provider: ModelProvider,
+    text_for,
+    *,
+    action: str,
+    subject: str,
+) -> int:
+    model = _embedding_model(provider)
+    dimensions = getattr(provider, 'embedding_dimensions', None)
+    pending = [
+        row
+        for row in rows
+        if not row.embedding
+        or row.embedding_model != model
+        or (dimensions and len(row.embedding) != dimensions)
+    ]
+    if not pending:
+        return 0
+    vectors = _call_provider(
+        action,
+        lambda: provider.embed([text_for(row) for row in pending]),
+    )
+    if len(vectors) != len(pending):
+        raise ProviderError(
+            f'Embedding provider returned {len(vectors)} vectors for '
+            f'{len(pending)} {subject}.'
+        )
+    generated_at = utcnow()
+    for row, vector in zip(pending, vectors):
+        if not vector:
+            raise ProviderError(
+                f'Embedding provider returned an empty vector for {subject} {row.id}.'
+            )
+        row.embedding = [float(value) for value in vector]
+        row.embedding_model = model
+        row.embedding_generated_at = generated_at
+        # Document versions record the dimension explicitly; Knowledge predates it.
+        if hasattr(row, 'embedding_dimensions'):
+            row.embedding_dimensions = len(vector)
+    return len(pending)
+
+
 def cache_knowledge_embeddings(session=None, provider: ModelProvider | None = None) -> int:
     """Compute and persist embeddings for new or model-stale knowledge rows."""
     provider = provider or get_provider()
-    model = _embedding_model(provider)
-    dimensions = getattr(provider, 'embedding_dimensions', None)
     with use_session(session) as active_session:
         rows = list(active_session.scalars(select(Knowledge)).all())
-        pending = [
-            row
-            for row in rows
-            if not row.embedding
-            or row.embedding_model != model
-            or (dimensions and len(row.embedding) != dimensions)
-        ]
-        if not pending:
-            return 0
-        vectors = _call_provider(
-            'Embedding provider failed while caching knowledge',
-            lambda: provider.embed([knowledge_text(row) for row in pending]),
+        cached = _cache_embeddings(
+            rows,
+            provider,
+            knowledge_text,
+            action='Embedding provider failed while caching knowledge',
+            subject='knowledge rows',
         )
-        if len(vectors) != len(pending):
-            raise ProviderError(
-                f'Embedding provider returned {len(vectors)} vectors for '
-                f'{len(pending)} knowledge rows.'
+        if cached:
+            active_session.flush()
+        return cached
+
+
+def document_version_text(
+    version: DocumentVersion, document: Document | None
+) -> str:
+    return ' '.join(
+        part
+        for part in (
+            document.title if document else '',
+            version.label or '',
+            version.content_text or '',
+        )
+        if part
+    )
+
+
+def cache_document_embeddings(
+    session=None, provider: ModelProvider | None = None
+) -> int:
+    """Compute and persist full-text embeddings for document versions."""
+    provider = provider or get_provider()
+    with use_session(session) as active_session:
+        rows = active_session.execute(
+            select(DocumentVersion, Document).join(
+                Document, DocumentVersion.document_id == Document.id
             )
-        generated_at = utcnow()
-        for row, vector in zip(pending, vectors):
-            if not vector:
-                raise ProviderError(
-                    f'Embedding provider returned an empty vector for knowledge {row.id}.'
-                )
-            row.embedding = [float(value) for value in vector]
-            row.embedding_model = model
-            row.embedding_generated_at = generated_at
-        active_session.flush()
-        return len(pending)
+        ).all()
+        documents = {document.id: document for _version, document in rows}
+        versions = [version for version, _document in rows]
+        cached = _cache_embeddings(
+            versions,
+            provider,
+            lambda version: document_version_text(
+                version, documents[version.document_id]
+            ),
+            action='Embedding provider failed while caching document versions',
+            subject='document versions',
+        )
+        if cached:
+            active_session.flush()
+        return cached
 
 
 def retrieve(

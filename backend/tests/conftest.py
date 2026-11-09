@@ -12,6 +12,7 @@ fd, path = tempfile.mkstemp(suffix='.db')
 os.close(fd)
 os.environ['DATABASE_PATH'] = path
 os.environ['DATABASE_URL'] = ''
+os.environ['DOCUMENT_STORAGE_DIR'] = tempfile.mkdtemp(prefix='documents-')
 
 
 @pytest.fixture()

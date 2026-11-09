@@ -11,10 +11,18 @@
 - **Dispatch（统一入口）**：把一条用户消息分流到 Direct RAG、Direct Tool、Agent Loop 或 Workflow 的单一入口；HTTP API 与评测共用它。
 - **Workflow**：退款、投诉等多步骤、有分支、可能有副作用的流程，创建后台 Task 后由 Worker 驱动。
 
+## 文档管理
+
+- **Document（文档）**：知识的管理单元，承载租户、标题、分类、可见性与生命周期；一个文档拥有多个版本，同一时刻最多一个已发布版本。
+- **Document Version（文档版本）**：文档的一次不可变内容快照，包含原始文件、解析正文与版本号；发布后不可修改，修改必须生成新版本。
+- **Published Version（已发布版本）**：已完成解析、允许参与召回的文档版本；同一文档同一时刻最多一个。
+- **Visibility（可见性）**：文档的读取范围，分为 `tenant`（租户内全员）、`staff_only`（客服与管理员）、`restricted`（按 `allowed_roles` 显式授权）。
+- **Ingestion（入库）**：把文档版本解析并转化为可检索知识的过程。
+
 ## 检索
 
 - **Knowledge（知识）**：退款政策、物流 SOP、发票说明等相对稳定的规则文本。
-- **Active Version（有效版本）**：`status=active` 且 `effective_from <= now` 的知识版本；历史版本不参与召回。
+- **Recall Eligibility（召回资格）**：文档为 `active`、版本为 `published`、`effective_from <= now`，且调用者按 Visibility 可见；只有满足条件的版本参与召回。
 - **Hybrid Retrieval（混合召回）**：BM25 词法召回与向量语义召回并行执行。
 - **RRF（Reciprocal Rank Fusion）**：按排名而非分数融合两路召回结果。
 - **Rerank（精排）**：用 Cross-Encoder 对粗排候选重新打分，返回最终 Evidence。
@@ -23,6 +31,7 @@
 ## 安全与业务事实
 
 - **Security Context（安全上下文）**：由服务端从请求头解析出的 `user_id / tenant_id / role`，Tool 只能信任它，不能信任模型传入的身份字段。
+- **Service Principal（服务身份）**：Workflow 内部检索使用的非用户身份，仅限同租户的策略检索，不暴露给前端或客户可见输出。
 - **Tool Runtime（工具运行时）**：执行 Order / Logistics / Refund / Ticket 操作的边界层，负责归属校验、租户隔离与错误映射。
 - **Order Ownership（订单归属）**：订单的 `user_id` 与 `tenant_id` 必须与 Security Context 一致；客服角色可代查，客户不可越权。
 

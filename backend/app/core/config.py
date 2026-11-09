@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     mock_mode: bool = True
     database_path: str = './data/customer_service.db'
     database_url: str = ''
+    document_storage_dir: str = './data/documents'
     checkpoint_path: str = ''
     workflow_engine: str = 'langgraph'
     sse_poll_interval: float = 0.5
@@ -66,6 +67,7 @@ class Settings(BaseSettings):
         for path in paths:
             if path and path != ':memory:':
                 Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(self.document_storage_dir).mkdir(parents=True, exist_ok=True)
 
 
 settings = Settings()

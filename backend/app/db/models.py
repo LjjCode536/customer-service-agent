@@ -11,7 +11,9 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -95,6 +97,89 @@ class Knowledge(Base):
     embedding: Mapped[list[float] | None] = mapped_column(JSON)
     embedding_model: Mapped[str | None] = mapped_column(String(128))
     embedding_generated_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class Document(Base):
+    __tablename__ = 'documents'
+    __table_args__ = (
+        Index('ix_documents_tenant_id', 'tenant_id'),
+        Index('ix_documents_tenant_category', 'tenant_id', 'category'),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str | None] = mapped_column(String(64))
+    title: Mapped[str | None] = mapped_column(String(255))
+    category: Mapped[str | None] = mapped_column(String(64))
+    product_type: Mapped[str | None] = mapped_column(String(64))
+    visibility: Mapped[str] = mapped_column(
+        String(32), default='tenant', nullable=False
+    )
+    allowed_roles: Mapped[list[str] | None] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(32), default='active', nullable=False)
+    owner_id: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.current_timestamp(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp(),
+        nullable=False,
+    )
+
+
+class DocumentVersion(Base):
+    __tablename__ = 'document_versions'
+    __table_args__ = (
+        UniqueConstraint(
+            'document_id', 'version_number', name='uq_document_versions_number'
+        ),
+        Index('ix_document_versions_document_id', 'document_id'),
+        Index(
+            'ix_document_versions_status_effective_from',
+            'status',
+            'effective_from',
+        ),
+        # Partial unique index: a document may have at most one published version.
+        Index(
+            'uq_document_versions_one_published',
+            'document_id',
+            unique=True,
+            sqlite_where=text("status = 'published'"),
+            postgresql_where=text("status = 'published'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    document_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey('documents.id'), nullable=False
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    label: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32), default='draft', nullable=False)
+    effective_from: Mapped[str | None] = mapped_column(String(64))
+    content_text: Mapped[str | None] = mapped_column(Text)
+    source_filename: Mapped[str | None] = mapped_column(String(255))
+    storage_key: Mapped[str | None] = mapped_column(String(512))
+    checksum: Mapped[str | None] = mapped_column(String(64))
+    size_bytes: Mapped[int | None] = mapped_column(Integer)
+    mime_type: Mapped[str | None] = mapped_column(String(128))
+    embedding: Mapped[list[float] | None] = mapped_column(JSON)
+    embedding_model: Mapped[str | None] = mapped_column(String(128))
+    embedding_dimensions: Mapped[int | None] = mapped_column(Integer)
+    embedding_generated_at: Mapped[datetime | None] = mapped_column(DateTime)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.current_timestamp(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp(),
+        nullable=False,
+    )
 
 
 class RefundRequest(Base):

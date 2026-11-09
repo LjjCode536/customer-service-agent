@@ -8,6 +8,8 @@ from app.db.models import (
     AuditLog,
     BadCase,
     Customer,
+    Document,
+    DocumentVersion,
     Knowledge,
     Logistics,
     Order,
@@ -18,8 +20,65 @@ from app.db.models import (
     TraceStep,
 )
 from app.db.schema import init_schema
+from app.documents.storage import store_text
 from app.fixtures.mock_data import CUSTOMERS, KNOWLEDGE, LOGISTICS, ORDERS
-from app.rag.hybrid import cache_knowledge_embeddings
+from app.rag.hybrid import cache_document_embeddings, cache_knowledge_embeddings
+
+SEED_DOCUMENTS = [
+    {
+        'id': 'DOC-REFUND-ELECTRONICS',
+        'title': '电子商品售后退款政策',
+        'category': 'refund',
+        'product_type': 'electronics',
+        'visibility': 'tenant',
+    },
+    {
+        'id': 'DOC-LOGISTICS-SOP',
+        'title': '物流异常处理SOP',
+        'category': 'logistics',
+        'product_type': 'all',
+        'visibility': 'staff_only',
+    },
+    {
+        'id': 'DOC-INVOICE',
+        'title': '电子发票开具说明',
+        'category': 'invoice',
+        'product_type': 'all',
+        'visibility': 'tenant',
+    },
+]
+
+# Explicit mapping from the legacy Knowledge rows to documents and versions.
+SEED_VERSIONS = [
+    {
+        'id': 'KB-REFUND-V2',
+        'document_id': 'DOC-REFUND-ELECTRONICS',
+        'version_number': 1,
+        'label': '2025-v2',
+        'status': 'superseded',
+    },
+    {
+        'id': 'KB-REFUND-V3',
+        'document_id': 'DOC-REFUND-ELECTRONICS',
+        'version_number': 2,
+        'label': '2026-v3',
+        'status': 'published',
+    },
+    {
+        'id': 'KB-LOGISTICS-V1',
+        'document_id': 'DOC-LOGISTICS-SOP',
+        'version_number': 1,
+        'label': '2026-v1',
+        'status': 'published',
+    },
+    {
+        'id': 'KB-INVOICE-V1',
+        'document_id': 'DOC-INVOICE',
+        'version_number': 1,
+        'label': '2026-v1',
+        'status': 'published',
+    },
+]
 
 
 def seed(verbose: bool = True):
@@ -28,6 +87,8 @@ def seed(verbose: bool = True):
         # Child tables first so the logistics -> orders foreign key is never violated.
         for model in (
             ApprovalRecord,
+            DocumentVersion,
+            Document,
             TaskEvent,
             Task,
             Ticket,
@@ -109,6 +170,62 @@ def seed(verbose: bool = True):
         )
         session.flush()
         cache_knowledge_embeddings(session)
+
+        knowledge_by_id = {x['id']: x for x in KNOWLEDGE}
+        session.add_all(
+            [
+                Document(
+                    id=x['id'],
+                    tenant_id='TENANT-DEMO',
+                    title=x['title'],
+                    category=x['category'],
+                    product_type=x['product_type'],
+                    visibility=x['visibility'],
+                    allowed_roles=None,
+                    status='active',
+                    owner_id='seed',
+                )
+                for x in SEED_DOCUMENTS
+            ]
+        )
+        session.flush()  # documents must exist before versions are inserted
+
+        versions = []
+        for spec in SEED_VERSIONS:
+            knowledge = knowledge_by_id[spec['id']]
+            stored = store_text(knowledge['content'])
+            published_at = (
+                datetime.fromisoformat(knowledge['effective_from'])
+                if spec['status'] in {'published', 'superseded'}
+                else None
+            )
+            versions.append(
+                DocumentVersion(
+                    id=spec['id'],
+                    document_id=spec['document_id'],
+                    version_number=spec['version_number'],
+                    label=spec['label'],
+                    status=spec['status'],
+                    effective_from=knowledge['effective_from'],
+                    content_text=knowledge['content'],
+                    source_filename=f"{spec['id']}.txt",
+                    storage_key=stored.storage_key,
+                    checksum=stored.checksum,
+                    size_bytes=stored.size_bytes,
+                    mime_type=stored.mime_type,
+                    embedding=None,
+                    embedding_model=None,
+                    embedding_dimensions=None,
+                    embedding_generated_at=None,
+                    error_code=None,
+                    error_message=None,
+                    published_at=published_at,
+                )
+            )
+        session.add_all(versions)
+        session.flush()
+        cache_document_embeddings(session)
+
         session.add(
             RefundRequest(
                 id='RR-HISTORY-10004',

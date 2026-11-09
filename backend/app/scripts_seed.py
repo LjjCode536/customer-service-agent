@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import delete
 
-from app.db.database import dumps, session_scope
+from app.db.database import session_scope
 from app.db.models import (
     ApprovalRecord,
     AuditLog,
@@ -10,7 +10,6 @@ from app.db.models import (
     Customer,
     Document,
     DocumentVersion,
-    Knowledge,
     Logistics,
     Order,
     RefundRequest,
@@ -22,7 +21,7 @@ from app.db.models import (
 from app.db.schema import init_schema
 from app.documents.storage import store_text
 from app.fixtures.mock_data import CUSTOMERS, KNOWLEDGE, LOGISTICS, ORDERS
-from app.rag.hybrid import cache_document_embeddings, cache_knowledge_embeddings
+from app.rag.hybrid import cache_document_embeddings
 
 SEED_DOCUMENTS = [
     {
@@ -99,7 +98,6 @@ def seed(verbose: bool = True):
             Logistics,
             Order,
             Customer,
-            Knowledge,
         ):
             session.execute(delete(model))
 
@@ -149,28 +147,6 @@ def seed(verbose: bool = True):
                 for x in LOGISTICS
             ]
         )
-        session.add_all(
-            [
-                Knowledge(
-                    id=x['id'],
-                    category=x['category'],
-                    product_type=x['product_type'],
-                    title=x['title'],
-                    version=x['version'],
-                    status=x['status'],
-                    effective_from=x['effective_from'],
-                    content=x['content'],
-                    keywords_json=dumps(x['keywords']),
-                    embedding=None,
-                    embedding_model=None,
-                    embedding_generated_at=None,
-                )
-                for x in KNOWLEDGE
-            ]
-        )
-        session.flush()
-        cache_knowledge_embeddings(session)
-
         knowledge_by_id = {x['id']: x for x in KNOWLEDGE}
         session.add_all(
             [

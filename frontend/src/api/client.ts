@@ -84,3 +84,29 @@ export const api = {
   post: <T>(path: string, body?: unknown) => request<T>(path, { method: 'POST', body }),
   patch: <T>(path: string, body?: unknown) => request<T>(path, { method: 'PATCH', body }),
 }
+
+/** Authenticated file download: security headers are required, so a plain anchor cannot be used. */
+export async function downloadFile(path: string, filename: string): Promise<void> {
+  const response = await fetch(`${API_BASE}${path}`, { headers: securityHeaders() })
+  if (!response.ok) {
+    const raw = await response.text()
+    let payload: unknown = raw
+    if (raw) {
+      try {
+        payload = JSON.parse(raw)
+      } catch {
+        payload = raw
+      }
+    }
+    throw new ApiError(response.status, errorMessage(response.status, payload), payload)
+  }
+  const blob = await response.blob()
+  const objectUrl = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = objectUrl
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(objectUrl)
+}

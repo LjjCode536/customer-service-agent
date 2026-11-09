@@ -2,11 +2,12 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from app.core.security import SecurityContext
 from app.db.database import session_scope
-from app.db.models import Knowledge
+from app.db.models import Document, DocumentVersion
 from app.llm.provider import ProviderError, RerankResult, reset_provider, set_provider
 from app.main import app
-from app.rag.hybrid import cache_knowledge_embeddings, retrieve
+from app.rag.hybrid import cache_document_embeddings, retrieve
 from app.scripts_seed import seed
 
 CONCEPTS = {
@@ -15,6 +16,8 @@ CONCEPTS = {
     'invoice': ('发票', '税号', '开票'),
     'vip': ('vip', '投诉', '专席'),
 }
+
+CTX = SecurityContext('U1001', 'TENANT-DEMO', 'customer')
 
 
 def _concepts(text: str) -> set[str]:
@@ -122,48 +125,59 @@ def rag_db(concept_provider):
     return concept_provider
 
 
-def _add_distractors(count: int = 12):
-    with session_scope() as session:
-        session.add_all(
-            [
-                Knowledge(
-                    id=f'KB-DIST-{index:02d}',
-                    category='general',
-                    product_type='all',
-                    title=f'占位文档 {index}',
-                    version='2026-v1',
-                    status='active',
-                    effective_from='2020-01-01',
-                    content='无关内容占位文档，不包含业务关键词。',
-                    keywords_json='[]',
-                )
-                for index in range(count)
-            ]
-        )
-    cache_knowledge_embeddings()
-
-
-def _add_version(knowledge_id: str, *, status: str, effective_from: str):
+def _add_document_version(
+    version_id: str,
+    *,
+    document_id: str | None = None,
+    category: str = 'general',
+    product_type: str = 'all',
+    title: str = '占位文档',
+    content: str = '无关内容占位文档，不包含业务关键词。',
+    status: str = 'published',
+    effective_from: str = '2020-01-01',
+    label: str = '2026-v1',
+    tenant_id: str = 'TENANT-DEMO',
+    document_status: str = 'active',
+    cache: bool = True,
+) -> None:
+    document_id = document_id or f'DOC-{version_id}'
     with session_scope() as session:
         session.add(
-            Knowledge(
-                id=knowledge_id,
-                category='invoice',
-                product_type='all',
-                title='电子发票开具说明',
-                version='2027-v1',
-                status=status,
-                effective_from=effective_from,
-                content='订单完成后可在订单详情申请电子发票，企业抬头需填写税号。',
-                keywords_json='["发票","电子发票","税号"]',
+            Document(
+                id=document_id,
+                tenant_id=tenant_id,
+                title=title,
+                category=category,
+                product_type=product_type,
+                visibility='tenant',
+                status=document_status,
             )
         )
-    cache_knowledge_embeddings()
+        session.flush()
+        session.add(
+            DocumentVersion(
+                id=version_id,
+                document_id=document_id,
+                version_number=1,
+                label=label,
+                status=status,
+                effective_from=effective_from,
+                content_text=content,
+            )
+        )
+    if cache:
+        cache_document_embeddings()
+
+
+def _add_distractors(count: int = 12):
+    for index in range(count):
+        _add_document_version(f'KB-DIST-{index:02d}', cache=False)
+    cache_document_embeddings()
 
 
 def test_seed_caches_embeddings_with_model_identifier(rag_db):
     with session_scope() as session:
-        rows = session.scalars(select(Knowledge)).all()
+        rows = session.scalars(select(DocumentVersion)).all()
 
     assert rows
     for row in rows:
@@ -173,11 +187,37 @@ def test_seed_caches_embeddings_with_model_identifier(rag_db):
         assert row.embedding_generated_at is not None
 
 
-def test_only_active_versions_effective_now_are_recalled(rag_db):
-    _add_version('KB-INVOICE-INACTIVE', status='inactive', effective_from='2020-01-01')
-    _add_version('KB-INVOICE-FUTURE', status='active', effective_from='2999-01-01')
+def test_only_published_versions_effective_now_are_recalled(rag_db):
+    _add_document_version(
+        'KB-INVOICE-READY',
+        category='invoice',
+        content='订单完成后可在订单详情申请电子发票，企业抬头需填写税号。',
+        status='ready',
+        cache=False,
+    )
+    _add_document_version(
+        'KB-INVOICE-FUTURE',
+        category='invoice',
+        content='订单完成后可在订单详情申请电子发票，企业抬头需填写税号。',
+        effective_from='2999-01-01',
+        cache=False,
+    )
 
-    evidence = retrieve('电子发票怎么开', category='invoice', top_n=5)
+    evidence = retrieve('电子发票怎么开', category='invoice', top_n=5, ctx=CTX)
+
+    assert [item['id'] for item in evidence] == ['KB-INVOICE-V1']
+
+
+def test_archived_document_versions_are_not_recalled(rag_db):
+    _add_document_version(
+        'KB-INVOICE-ARCHIVED',
+        category='invoice',
+        content='订单完成后可在订单详情申请电子发票，企业抬头需填写税号。',
+        document_status='archived',
+        cache=False,
+    )
+
+    evidence = retrieve('电子发票怎么开', category='invoice', top_n=5, ctx=CTX)
 
     assert [item['id'] for item in evidence] == ['KB-INVOICE-V1']
 
@@ -185,7 +225,7 @@ def test_only_active_versions_effective_now_are_recalled(rag_db):
 def test_bm25_route_ranks_exact_keyword_match(rag_db):
     set_provider(ZeroVectorProvider())
 
-    evidence = retrieve('电子发票怎么开', top_n=1)
+    evidence = retrieve('电子发票怎么开', top_n=1, ctx=CTX)
 
     assert evidence[0]['id'] == 'KB-INVOICE-V1'
     assert evidence[0]['bm25_rank'] == 1
@@ -195,7 +235,7 @@ def test_bm25_route_ranks_exact_keyword_match(rag_db):
 def test_embedding_route_recalls_synonym_without_lexical_overlap(rag_db):
     _add_distractors()
 
-    evidence = retrieve('东西没送到', top_n=1)
+    evidence = retrieve('东西没送到', top_n=1, ctx=CTX)
 
     assert evidence[0]['id'] == 'KB-LOGISTICS-V1'
     assert evidence[0]['bm25_score'] == 0
@@ -205,7 +245,7 @@ def test_embedding_route_recalls_synonym_without_lexical_overlap(rag_db):
 
 
 def test_rrf_score_is_the_sum_of_both_route_ranks(rag_db):
-    evidence = retrieve('退款 发票', top_n=4)
+    evidence = retrieve('退款 发票', top_n=4, ctx=CTX)
 
     assert evidence
     for item in evidence:
@@ -218,36 +258,21 @@ def test_rrf_score_is_the_sum_of_both_route_ranks(rag_db):
 
 
 def test_rrf_prefers_documents_recalled_by_both_routes(rag_db):
-    with session_scope() as session:
-        session.add_all(
-            [
-                Knowledge(
-                    id='KB-A-BOTH',
-                    category='general',
-                    product_type='all',
-                    title='退款 特殊关键词',
-                    version='2026-v1',
-                    status='active',
-                    effective_from='2020-01-01',
-                    content='退款 特殊关键词',
-                    keywords_json='[]',
-                ),
-                Knowledge(
-                    id='KB-Z-LEXICAL',
-                    category='general',
-                    product_type='all',
-                    title='特殊关键词',
-                    version='2026-v1',
-                    status='active',
-                    effective_from='2020-01-01',
-                    content='特殊关键词',
-                    keywords_json='[]',
-                ),
-            ]
-        )
-    cache_knowledge_embeddings()
+    _add_document_version(
+        'KB-A-BOTH',
+        title='退款 特殊关键词',
+        content='退款 特殊关键词',
+        cache=False,
+    )
+    _add_document_version(
+        'KB-Z-LEXICAL',
+        title='特殊关键词',
+        content='特殊关键词',
+        cache=False,
+    )
+    cache_document_embeddings()
 
-    ids = [item['id'] for item in retrieve('退款 特殊关键词', top_n=4)]
+    ids = [item['id'] for item in retrieve('退款 特殊关键词', top_n=4, ctx=CTX)]
 
     assert 'KB-A-BOTH' in ids
     assert 'KB-Z-LEXICAL' in ids
@@ -255,12 +280,12 @@ def test_rrf_prefers_documents_recalled_by_both_routes(rag_db):
 
 
 def test_rerank_controls_final_order_and_repeats_stably(rag_db):
-    baseline = retrieve('退款', top_n=1)
+    baseline = retrieve('退款', top_n=1, ctx=CTX)
     provider = ReverseRerankProvider()
     set_provider(provider)
 
-    first = retrieve('退款', top_n=2)
-    second = retrieve('退款', top_n=2)
+    first = retrieve('退款', top_n=2, ctx=CTX)
+    second = retrieve('退款', top_n=2, ctx=CTX)
 
     candidates = provider.rerank_calls[-1][1]
     assert baseline[0]['id'] == 'KB-REFUND-V3'
@@ -275,104 +300,91 @@ def test_duplicate_rerank_indices_are_explicit(rag_db):
     set_provider(DuplicateRerankProvider())
 
     with pytest.raises(ProviderError, match='duplicate candidate index'):
-        retrieve('电子发票怎么开')
+        retrieve('电子发票怎么开', ctx=CTX)
 
 
 def test_embedding_provider_failure_is_explicit(rag_db):
     set_provider(FailingEmbedProvider())
 
     with pytest.raises(ProviderError, match='embedding'):
-        retrieve('电子发票怎么开')
+        retrieve('电子发票怎么开', ctx=CTX)
 
 
 def test_rerank_provider_failure_is_explicit(rag_db):
     set_provider(FailingRerankProvider())
 
     with pytest.raises(ProviderError, match='rerank'):
-        retrieve('电子发票怎么开')
+        retrieve('电子发票怎么开', ctx=CTX)
 
 
 def test_empty_rerank_response_is_explicit(rag_db):
     set_provider(EmptyRerankProvider())
 
     with pytest.raises(ProviderError, match='no results'):
-        retrieve('电子发票怎么开')
+        retrieve('电子发票怎么开', ctx=CTX)
 
 
 def test_unrelated_query_returns_no_evidence(rag_db):
-    assert retrieve('完全无关的一句话') == []
+    assert retrieve('完全无关的一句话', ctx=CTX) == []
+
+
+def test_cross_tenant_retrieval_returns_no_evidence(rag_db):
+    other = SecurityContext('U1001', 'TENANT-OTHER', 'customer')
+
+    assert retrieve('电子发票怎么开', ctx=other) == []
 
 
 def test_embedding_cache_recomputes_when_model_changes(rag_db):
     rag_db.embedding_model = 'concept-embedding-v2'
 
-    assert cache_knowledge_embeddings(provider=rag_db) == 4
+    assert cache_document_embeddings(provider=rag_db) == 4
 
     with session_scope() as session:
-        rows = session.scalars(select(Knowledge)).all()
+        rows = session.scalars(select(DocumentVersion)).all()
     assert {row.embedding_model for row in rows} == {'concept-embedding-v2'}
 
 
 def test_embedding_cache_recomputes_when_dimensions_change(rag_db):
     resized = ResizedConceptProvider()
 
-    assert cache_knowledge_embeddings(provider=resized) == 4
+    assert cache_document_embeddings(provider=resized) == 4
 
     with session_scope() as session:
-        rows = session.scalars(select(Knowledge)).all()
+        rows = session.scalars(select(DocumentVersion)).all()
     assert {len(row.embedding) for row in rows} == {len(CONCEPTS) + 1}
 
     set_provider(resized)
-    assert retrieve('电子发票怎么开', top_n=1)[0]['id'] == 'KB-INVOICE-V1'
+    assert retrieve('电子发票怎么开', top_n=1, ctx=CTX)[0]['id'] == 'KB-INVOICE-V1'
 
 
 def test_stale_embedding_model_is_reported_instead_of_mixed(rag_db):
     rag_db.embedding_model = 'concept-embedding-v2'
 
     with pytest.raises(ProviderError, match='re-run embedding caching'):
-        retrieve('电子发票怎么开')
+        retrieve('电子发票怎么开', ctx=CTX)
 
 
 def test_missing_embedding_is_reported_instead_of_silently_degraded(rag_db):
-    with session_scope() as session:
-        session.add(
-            Knowledge(
-                id='KB-NO-EMBEDDING',
-                category='invoice',
-                product_type='all',
-                title='电子发票开具说明',
-                version='2028-v1',
-                status='active',
-                effective_from='2020-01-01',
-                content='订单完成后可在订单详情申请电子发票，企业抬头需填写税号。',
-                keywords_json='["发票"]',
-            )
-        )
+    _add_document_version(
+        'KB-NO-EMBEDDING',
+        category='invoice',
+        content='订单完成后可在订单详情申请电子发票，企业抬头需填写税号。',
+        cache=False,
+    )
 
     with pytest.raises(ProviderError, match='no cached embedding'):
-        retrieve('电子发票怎么开', category='invoice')
+        retrieve('电子发票怎么开', category='invoice', ctx=CTX)
 
 
 def test_empty_token_corpus_does_not_crash(rag_db):
-    with session_scope() as session:
-        session.add_all(
-            [
-                Knowledge(
-                    id='KB-EMPTY-1',
-                    category='empty',
-                    product_type='all',
-                    title='',
-                    version='2026-v1',
-                    status='active',
-                    effective_from='2020-01-01',
-                    content='',
-                    keywords_json='[]',
-                )
-            ]
-        )
-    cache_knowledge_embeddings()
+    _add_document_version(
+        'KB-EMPTY-1',
+        category='empty',
+        title='',
+        content='',
+    )
 
-    assert retrieve('随便问一句', category='empty') == []
+    assert retrieve('随便问一句', category='empty', ctx=CTX) == []
 
 
 def test_faq_chat_reports_provider_failure_explicitly(rag_db):

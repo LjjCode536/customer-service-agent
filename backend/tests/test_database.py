@@ -9,6 +9,7 @@ from app.db.models import (
     BadCase,
     Base,
     Customer,
+    DocumentVersion,
     Knowledge,
     Logistics,
     Order,
@@ -67,7 +68,7 @@ def test_seed_is_repeatable(seeded_db):
     with session_scope() as session:
         assert session.scalar(select(func.count()).select_from(Customer)) == 5
         assert session.scalar(select(func.count()).select_from(Order)) == 5
-        assert session.scalar(select(func.count()).select_from(Knowledge)) == 4
+        assert session.scalar(select(func.count()).select_from(DocumentVersion)) == 4
 
 
 def test_knowledge_records_embedding_metadata():

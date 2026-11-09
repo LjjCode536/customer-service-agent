@@ -10,6 +10,17 @@ export function formatAmount(value?: number | null): string {
   return `¥${value.toFixed(2)}`
 }
 
+export function formatBytes(value?: number | null): string {
+  if (value === null || value === undefined) return '-'
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  return `${(value / 1024 / 1024).toFixed(1)} MB`
+}
+
+export function versionLabel(version: { label?: string | null; version_number: number }): string {
+  return version.label ?? `v${version.version_number}`
+}
+
 export function matchesKeyword(keyword: string, values: Array<string | number | null | undefined>): boolean {
   const query = keyword.trim().toLowerCase()
   if (!query) return true
@@ -34,6 +45,12 @@ const statusTone: Record<string, string> = {
   failed: 'red',
   active: 'green',
   inactive: 'default',
+  draft: 'default',
+  processing: 'blue',
+  ready: 'cyan',
+  published: 'green',
+  superseded: 'default',
+  archived: 'default',
 }
 
 export function statusColor(status?: string | null): string {

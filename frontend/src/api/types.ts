@@ -63,16 +63,48 @@ export interface Approval {
   updated_at: string
 }
 
-export interface KnowledgeDoc {
+export interface DocumentVersion {
   id: string
+  document_id: string
+  version_number: number
+  label?: string | null
+  status: string
+  effective_from?: string | null
+  source_filename?: string | null
+  checksum?: string | null
+  size_bytes?: number | null
+  mime_type?: string | null
+  error_code?: string | null
+  error_message?: string | null
+  published_at?: string | null
+  created_at: string
+  updated_at: string
+  has_source_file: boolean
+  content_text?: string | null
+  document_title?: string | null
   category?: string | null
   product_type?: string | null
+  visibility?: string | null
+}
+
+export interface DocumentSummary {
+  id: string
+  tenant_id?: string | null
   title?: string | null
-  version?: string | null
-  status?: string | null
-  effective_from?: string | null
-  content?: string | null
-  keywords: string[]
+  category?: string | null
+  product_type?: string | null
+  visibility: string
+  allowed_roles?: string[] | null
+  status: string
+  owner_id?: string | null
+  created_at: string
+  updated_at: string
+  version_count: number
+  published_version?: DocumentVersion | null
+}
+
+export interface DocumentDetail extends DocumentSummary {
+  versions: DocumentVersion[]
 }
 
 export interface TraceStep {

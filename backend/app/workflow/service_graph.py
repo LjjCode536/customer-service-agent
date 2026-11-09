@@ -56,7 +56,7 @@ def _node_logistics(s): return {'logistics': get_logistics(s['order_id'], ctx(s)
 
 def _node_knowledge(s):
     category = 'logistics' if s['intent'] == 'complaint' else 'refund'
-    return {'knowledge': retrieve(s['message'], category=category, product_type=s.get('order', {}).get('product_type'), top_n=4)}
+    return {'knowledge': retrieve(s['message'], category=category, product_type=s.get('order', {}).get('product_type'), top_n=4, ctx=ctx(s))}
 
 
 def _node_refunds(s): return {'refunds': get_refunds(s['order_id'], ctx(s))}

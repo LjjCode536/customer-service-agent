@@ -114,6 +114,7 @@ def _tool_retrieve_knowledge(arguments: Mapping[str, Any], ctx: SecurityContext)
     return retrieve(
         arguments['query'],
         top_n=arguments.get('top_n', 3),
+        ctx=ctx,
     )
 
 

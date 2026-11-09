@@ -6,8 +6,10 @@ import type {
   BadCase,
   ChatResponse,
   DashboardData,
+  DocumentDetail,
+  DocumentSummary,
+  DocumentVersion,
   EvaluationReport,
-  KnowledgeDoc,
   MockCase,
   Refund,
   RuntimeInfo,
@@ -23,7 +25,10 @@ export const queryKeys = {
   tickets: ['tickets'] as const,
   refunds: ['refunds'] as const,
   approvals: ['approvals'] as const,
-  knowledge: ['knowledge'] as const,
+  documents: ['documents'] as const,
+  document: (documentId?: string) => ['documents', documentId ?? 'none'] as const,
+  documentVersion: (documentId?: string, versionId?: string) =>
+    ['documents', documentId ?? 'none', 'versions', versionId ?? 'none'] as const,
   evaluation: ['evaluation'] as const,
   badCases: ['bad-cases'] as const,
   traces: (traceId?: string) => ['traces', traceId ?? 'all'] as const,
@@ -80,11 +85,28 @@ export function useApprovals() {
   })
 }
 
-export function useKnowledge() {
+/** Document-level catalogue; the drawer lazily loads the version history. */
+export function useDocuments() {
   return useQuery({
-    queryKey: queryKeys.knowledge,
-    queryFn: () => api.get<KnowledgeDoc[]>('/knowledge'),
-    staleTime: 60_000,
+    queryKey: queryKeys.documents,
+    queryFn: () => api.get<DocumentSummary[]>('/documents'),
+    staleTime: 10_000,
+  })
+}
+
+export function useDocument(documentId?: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.document(documentId),
+    queryFn: () => api.get<DocumentDetail>(`/documents/${documentId}`),
+    enabled: Boolean(documentId) && enabled,
+  })
+}
+
+export function useDocumentVersion(documentId?: string, versionId?: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.documentVersion(documentId, versionId),
+    queryFn: () => api.get<DocumentVersion>(`/documents/${documentId}/versions/${versionId}`),
+    enabled: Boolean(documentId && versionId) && enabled,
   })
 }
 

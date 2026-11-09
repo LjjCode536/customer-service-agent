@@ -25,7 +25,7 @@ def dispatch_message(message: str, ctx: SecurityContext) -> dict:
     order_id = route.get('order_id')
 
     if intent == 'faq':
-        docs = retrieve(message, top_n=3)
+        docs = retrieve(message, top_n=3, ctx=ctx)
         answer = docs[0]['content'] if docs else '当前知识库没有足够依据。'
         return {
             'mode': 'direct_rag',

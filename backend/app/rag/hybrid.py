@@ -11,8 +11,10 @@ from rank_bm25 import BM25Okapi
 from sqlalchemy import select
 
 from app.core.config import settings
-from app.db.database import loads, use_session, utcnow
-from app.db.models import Document, DocumentVersion, Knowledge
+from app.core.security import SecurityContext
+from app.db.database import use_session, utcnow
+from app.db.models import Document, DocumentVersion
+from app.documents.catalog import version_to_evidence
 from app.llm.provider import ModelProvider, ProviderError, get_provider
 
 RRF_K = 60
@@ -29,15 +31,10 @@ def tokenize(text: str | None) -> list[str]:
     ]
 
 
-def knowledge_text(row: Knowledge | dict[str, Any]) -> str:
-    if isinstance(row, dict):
-        title = row.get('title') or ''
-        content = row.get('content') or ''
-        keywords = row.get('keywords') or []
-    else:
-        title = row.title or ''
-        content = row.content or ''
-        keywords = loads(row.keywords_json, []) or []
+def knowledge_text(row: dict[str, Any]) -> str:
+    title = row.get('title') or ''
+    content = row.get('content') or ''
+    keywords = row.get('keywords') or []
     return ' '.join(
         part for part in (title, content, ' '.join(keywords)) if part
     )
@@ -80,27 +77,10 @@ def _cache_embeddings(
         row.embedding = [float(value) for value in vector]
         row.embedding_model = model
         row.embedding_generated_at = generated_at
-        # Document versions record the dimension explicitly; Knowledge predates it.
+        # Document versions record the dimension explicitly for publish validation.
         if hasattr(row, 'embedding_dimensions'):
             row.embedding_dimensions = len(vector)
     return len(pending)
-
-
-def cache_knowledge_embeddings(session=None, provider: ModelProvider | None = None) -> int:
-    """Compute and persist embeddings for new or model-stale knowledge rows."""
-    provider = provider or get_provider()
-    with use_session(session) as active_session:
-        rows = list(active_session.scalars(select(Knowledge)).all())
-        cached = _cache_embeddings(
-            rows,
-            provider,
-            knowledge_text,
-            action='Embedding provider failed while caching knowledge',
-            subject='knowledge rows',
-        )
-        if cached:
-            active_session.flush()
-        return cached
 
 
 def document_version_text(
@@ -150,12 +130,17 @@ def retrieve(
     product_type: str | None = None,
     top_n: int = 5,
     *,
+    ctx: SecurityContext,
     provider: ModelProvider | None = None,
 ) -> list[dict[str, Any]]:
-    """Run BM25 + embedding recall, RRF fusion and Cross-Encoder rerank."""
+    """Run BM25 + embedding recall, RRF fusion and Cross-Encoder rerank.
+
+    Only recall-eligible Published Versions are searched: the document must be
+    active in the caller's tenant and the version must be effective now.
+    """
     provider = provider or get_provider()
     now = utcnow()
-    docs = _load_active_docs(category, product_type, now)
+    docs = _load_active_docs(ctx, category, product_type, now)
     if not docs:
         return []
 
@@ -212,25 +197,35 @@ def retrieve(
 
 
 def _load_active_docs(
-    category: str | None, product_type: str | None, now: datetime
+    ctx: SecurityContext,
+    category: str | None,
+    product_type: str | None,
+    now: datetime,
 ) -> list[dict[str, Any]]:
     with use_session() as session:
-        rows = list(
-            session.scalars(
-                select(Knowledge).where(Knowledge.status == 'active')
-            ).all()
-        )
+        rows = session.execute(
+            select(DocumentVersion, Document)
+            .join(Document, DocumentVersion.document_id == Document.id)
+            .where(
+                Document.tenant_id == ctx.tenant_id,
+                Document.status == 'active',
+                DocumentVersion.status == 'published',
+            )
+        ).all()
     docs = []
-    for row in rows:
-        effective_from = _parse_effective_from(row.effective_from)
+    for version, document in rows:
+        effective_from = _parse_effective_from(version.effective_from)
         if effective_from is None or effective_from > now:
             continue
-        if category and row.category != category:
+        if category and document.category != category:
             continue
-        if product_type and row.product_type not in {product_type, 'all'}:
+        if product_type and document.product_type not in {product_type, 'all'}:
             continue
-        doc = row.to_dict()
-        doc['keywords'] = loads(doc.pop('keywords_json', '[]'), []) or []
+        doc = version_to_evidence(version, document)
+        # Scoring internals stay on the working copy and are stripped before Evidence.
+        doc['embedding'] = version.embedding
+        doc['embedding_model'] = version.embedding_model
+        doc['embedding_generated_at'] = version.embedding_generated_at
         docs.append(doc)
     return docs
 
@@ -297,17 +292,17 @@ def _score_vectors(
         embedding = doc.get('embedding')
         if not embedding:
             raise ProviderError(
-                f"Knowledge {doc['id']} has no cached embedding; "
+                f"Document version {doc['id']} has no cached embedding; "
                 're-run embedding caching before retrieval.'
             )
         if doc.get('embedding_model') != embedding_model:
             raise ProviderError(
-                f"Knowledge {doc['id']} was embedded with {doc.get('embedding_model')!r}, "
+                f"Document version {doc['id']} was embedded with {doc.get('embedding_model')!r}, "
                 f'not {embedding_model!r}; re-run embedding caching with the current model.'
             )
         if len(embedding) != len(query_vector):
             raise ProviderError(
-                f"Knowledge {doc['id']} embedding dimension {len(embedding)} "
+                f"Document version {doc['id']} embedding dimension {len(embedding)} "
                 f'does not match query dimension {len(query_vector)}; '
                 're-run embedding caching with the current model.'
             )

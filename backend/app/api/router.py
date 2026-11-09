@@ -1,7 +1,8 @@
 import asyncio
 from typing import Annotated
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
 from sse_starlette.sse import EventSourceResponse
@@ -18,11 +19,18 @@ from app.core.security import SecurityContext, get_security_context
 from app.db.database import dumps, engine, loads, session_scope
 from app.db.models import (
     ApprovalRecord,
-    Knowledge,
     RefundRequest,
     Task,
     Ticket,
     TraceStep,
+)
+from app.documents.catalog import (
+    DocumentNotFound,
+    get_document,
+    get_version,
+    knowledge_rows,
+    list_documents,
+    read_version_source,
 )
 from app.fixtures.mock_data import MOCK_CASES
 from app.llm.provider import ProviderError, describe_provider
@@ -200,17 +208,66 @@ def approve(approval_id, body: ApprovalDecision):
         raise HTTPException(400, str(exc)) from exc
 
 
+@router.get('/documents')
+def documents(
+    ctx: SecurityContextDep,
+    status: str | None = None,
+    category: str | None = None,
+    product_type: str | None = None,
+    visibility: str | None = None,
+    keyword: str | None = None,
+):
+    return list_documents(
+        ctx,
+        status=status,
+        category=category,
+        product_type=product_type,
+        visibility=visibility,
+        keyword=keyword,
+    )
+
+
+@router.get('/documents/{document_id}')
+def document_detail(document_id: str, ctx: SecurityContextDep):
+    try:
+        return get_document(ctx, document_id)
+    except DocumentNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.get('/documents/{document_id}/versions/{version_id}')
+def document_version(document_id: str, version_id: str, ctx: SecurityContextDep):
+    try:
+        return get_version(ctx, document_id, version_id)
+    except DocumentNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.get('/documents/{document_id}/versions/{version_id}/download')
+def download_document_version(
+    document_id: str, version_id: str, ctx: SecurityContextDep
+):
+    try:
+        version, data = read_version_source(ctx, document_id, version_id)
+    except DocumentNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    filename = (version.source_filename or f'{version.id}.txt').replace('"', '')
+    ascii_name = f'{version.id}.txt'
+    disposition = (
+        f'attachment; filename="{ascii_name}"; '
+        f"filename*=UTF-8''{quote(filename)}"
+    )
+    return Response(
+        content=data,
+        media_type=version.mime_type or 'application/octet-stream',
+        headers={'Content-Disposition': disposition},
+    )
+
+
 @router.get('/knowledge')
-def knowledge():
-    with session_scope() as s:
-        rows = [row.to_dict() for row in s.scalars(select(Knowledge).order_by(Knowledge.category, Knowledge.effective_from.desc()))]
-    for r in rows:
-        r['keywords'] = loads(r.pop('keywords_json', '[]'), [])
-        # Embedding cache is persistence internals, not part of the console payload.
-        r.pop('embedding', None)
-        r.pop('embedding_model', None)
-        r.pop('embedding_generated_at', None)
-    return rows
+def knowledge(ctx: SecurityContextDep):
+    """Legacy read model: Published Versions in the old flat knowledge shape."""
+    return knowledge_rows(ctx)
 
 
 @router.get('/traces')

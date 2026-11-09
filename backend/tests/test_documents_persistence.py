@@ -6,7 +6,7 @@ from sqlalchemy import func, inspect, select
 from sqlalchemy.exc import IntegrityError
 
 from app.db.database import session_scope
-from app.db.models import Document, DocumentVersion, Knowledge
+from app.db.models import Document, DocumentVersion
 from app.documents.storage import read_source
 from app.scripts_seed import seed
 
@@ -109,18 +109,6 @@ def test_seed_is_repeatable_for_documents(seeded_db):
         assert (
             session.scalar(select(func.count()).select_from(DocumentVersion)) == 4
         )
-
-
-def test_legacy_knowledge_rows_are_still_written(seeded_db):
-    with session_scope() as session:
-        ids = set(session.scalars(select(Knowledge.id)).all())
-
-    assert ids == {
-        'KB-REFUND-V2',
-        'KB-REFUND-V3',
-        'KB-LOGISTICS-V1',
-        'KB-INVOICE-V1',
-    }
 
 
 def test_seed_versions_cache_full_text_embeddings(seeded_db, fake_provider):

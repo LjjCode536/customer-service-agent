@@ -151,7 +151,7 @@ def list_documents(
     return rows
 
 
-def _load_document(ctx: SecurityContext, session, document_id: str) -> Document:
+def load_document(ctx: SecurityContext, session, document_id: str) -> Document:
     document = session.scalar(
         select(Document).where(
             Document.id == document_id,
@@ -166,7 +166,7 @@ def _load_document(ctx: SecurityContext, session, document_id: str) -> Document:
 def get_document(ctx: SecurityContext, document_id: str) -> dict[str, Any]:
     """Return one document plus its full version history."""
     with use_session() as session:
-        document = _load_document(ctx, session, document_id)
+        document = load_document(ctx, session, document_id)
         versions = list(
             session.scalars(
                 select(DocumentVersion)
@@ -186,7 +186,7 @@ def _load_version(
     document_id: str,
     version_id: str,
 ) -> tuple[Document, DocumentVersion]:
-    document = _load_document(ctx, session, document_id)
+    document = load_document(ctx, session, document_id)
     version = session.scalar(
         select(DocumentVersion).where(
             DocumentVersion.id == version_id,

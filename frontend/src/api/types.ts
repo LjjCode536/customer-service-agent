@@ -107,6 +107,21 @@ export interface DocumentDetail extends DocumentSummary {
   versions: DocumentVersion[]
 }
 
+/** 202 response from POST /documents and POST /documents/{id}/versions. */
+export interface DocumentUploadResponse {
+  document_id: string
+  version_id: string
+  version_number: number
+  status: string
+  document_status: string
+  source_filename?: string | null
+  checksum?: string | null
+  size_bytes?: number | null
+  mime_type?: string | null
+  effective_from?: string | null
+  label?: string | null
+}
+
 export interface TraceStep {
   id: number
   trace_id?: string | null

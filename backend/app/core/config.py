@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     database_path: str = './data/customer_service.db'
     database_url: str = ''
     document_storage_dir: str = './data/documents'
+    document_parse_timeout_seconds: float = 60.0
     checkpoint_path: str = ''
     workflow_engine: str = 'langgraph'
     sse_poll_interval: float = 0.5

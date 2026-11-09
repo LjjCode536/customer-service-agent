@@ -32,14 +32,17 @@ def store_text(
 
 
 def store_bytes(
-    data: bytes, *, mime_type: str = 'application/octet-stream'
+    data: bytes,
+    *,
+    mime_type: str = 'application/octet-stream',
+    checksum: str | None = None,
 ) -> StoredSource:
     """Write bytes to a content-addressed path, deduplicating identical content.
 
     The original filename is display metadata only and never participates in the
     storage path.
     """
-    checksum = hashlib.sha256(data).hexdigest()
+    checksum = checksum or hashlib.sha256(data).hexdigest()
     storage_key = f'{checksum[:2]}/{checksum}'
     path = source_path(storage_key)
     path.parent.mkdir(parents=True, exist_ok=True)

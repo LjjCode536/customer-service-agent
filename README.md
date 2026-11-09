@@ -93,6 +93,18 @@ FAQ 请求走真实检索链路（`backend/app/rag/hybrid.py`）：
 
 Evidence 包含 `title / version / content / bm25_score / vector_score / rrf_score / rerank_score` 以及两路排名。FAQ 响应同时返回 `citations` 和完整 `evidence`。Provider 失败时接口返回 503 或任务进入 failed，不会退回字符重合度或伪造向量。
 
+## 文档上传与入库
+
+`manager` 可在 Knowledge Center 上传 `.txt` / `.md`，或为已有文档上传新版本。`POST /api/v1/documents` 与 `POST /api/v1/documents/{document_id}/versions` 立即返回 `202`，前后端都不等待解析：
+
+- 原始文件按 SHA-256 内容寻址写入 `DOCUMENT_STORAGE_DIR`（默认 `./data/documents`；Compose 挂载在 `/app/data` volume）；原始文件名只用于展示。
+- 单文件上限 20MB，扩展名与文件头双重校验；不支持格式返回 `415`，超大文件返回 `413`。
+- Worker 以版本状态作为入库队列：`draft → processing → ready / failed`，解析后缓存整篇 embedding。失败版本记录 `error_code / error_message`，可在前端直接重试，复用原文件、无需重新上传。
+- 同租户相同 SHA-256 返回 `409` 与已存在文档信息；`force=true` 允许作为新文档或新版本继续。
+- 上传、版本创建、解析失败与重试均写 Audit；写操作只允许 `manager`，跨租户返回 `404`。
+
+解析是独立纯函数 seam（`backend/app/documents/parsing.py`）：UTF-8 优先、GB18030 回退、去除 BOM、统一换行；PDF / DOCX 在后续阶段接入同一 seam。
+
 ## 只读 Agent Loop
 
 `backend/app/services/agent_loop.py` 实现一个只读、有预算的 Agent Loop，用于意图不明确或多步只读查询。响应 `mode=agent_loop`，同时返回 `trace_id`、`stop_reason`、`handoff`、`steps`、`tool_calls`、`tokens_used` 与预算快照。
@@ -231,6 +243,7 @@ backend/
     api/          # HTTP 接口、SSE
     core/         # 配置、Security Context
     db/           # SQLAlchemy engine、session、models 与 create_all
+    documents/    # 上传、解析、内容寻址存储与异步入库
     llm/          # ModelProvider：Chat / Embedding / Rerank
     rag/          # 混合检索与精排
     services/     # Router、规则、Tool、Task
@@ -270,7 +283,7 @@ approval / idempotency`。评测在临时 SQLite 沙箱和 `OfflineProvider` 中
 ## 验证
 
 ```bash
-cd backend && python -m pytest -q          # 127 个测试，含重复 Resume、越级 409、RAG 召回、预算终止
+cd backend && python -m pytest -q          # 167 个测试，含上传入库、解析失败重试、RAG 召回与预算终止
 cd frontend && npm ci && npm run build     # TypeScript 类型检查 + 生产构建
 curl http://localhost:8000/api/v1/evaluation   # 5 个核心 Case + FAQ 的端到端评测
 docker compose up --build                  # API / Worker / 前端

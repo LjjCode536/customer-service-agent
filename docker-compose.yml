@@ -13,6 +13,7 @@ services:
       # when MODEL_API_KEY is empty; a real key keeps the configured provider.
       MODEL_PROVIDER: ${MODEL_PROVIDER:-offline}
       DATABASE_PATH: /app/data/customer_service.db
+      DOCUMENT_STORAGE_DIR: /app/data/documents
     volumes:
       - service_data:/app/data
     command: sh -c "python -m app.scripts_seed && uvicorn app.main:app --host 0.0.0.0 --port 8000"
@@ -40,6 +41,7 @@ services:
     environment:
       MODEL_PROVIDER: ${MODEL_PROVIDER:-offline}
       DATABASE_PATH: /app/data/customer_service.db
+      DOCUMENT_STORAGE_DIR: /app/data/documents
     volumes:
       - service_data:/app/data
     depends_on:

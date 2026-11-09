@@ -2,7 +2,17 @@ import asyncio
 from typing import Annotated
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+)
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
 from sse_starlette.sse import EventSourceResponse
@@ -24,6 +34,7 @@ from app.db.models import (
     Ticket,
     TraceStep,
 )
+from app.documents import uploads as document_uploads
 from app.documents.catalog import (
     DocumentNotFound,
     get_document,
@@ -31,6 +42,11 @@ from app.documents.catalog import (
     knowledge_rows,
     list_documents,
     read_version_source,
+)
+from app.documents.parsing import (
+    MAX_DOCUMENT_BYTES,
+    DocumentParseError,
+    DocumentTooLarge,
 )
 from app.fixtures.mock_data import MOCK_CASES
 from app.llm.provider import ProviderError, describe_provider
@@ -225,6 +241,118 @@ def documents(
         visibility=visibility,
         keyword=keyword,
     )
+
+
+def _read_upload(file: UploadFile) -> bytes:
+    data = file.file.read(MAX_DOCUMENT_BYTES + 1)
+    if len(data) > MAX_DOCUMENT_BYTES:
+        raise DocumentTooLarge(
+            f'Document is larger than the {MAX_DOCUMENT_BYTES}-byte limit.'
+        )
+    return data
+
+
+def _duplicate_response(exc: document_uploads.DuplicateDocument) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={
+            'detail': str(exc),
+            'existing_document': {
+                'document_id': exc.existing_document_id,
+                'version_id': exc.existing_version_id,
+                'title': exc.title,
+                'checksum': exc.checksum,
+            },
+        },
+    )
+
+
+@router.post('/documents', status_code=202)
+def create_document(
+    ctx: SecurityContextDep,
+    file: Annotated[UploadFile, File()],
+    title: Annotated[str, Form()],
+    category: Annotated[str | None, Form()] = None,
+    product_type: Annotated[str | None, Form()] = None,
+    visibility: Annotated[str, Form()] = 'tenant',
+    allowed_roles: Annotated[list[str] | None, Form()] = None,
+    effective_from: Annotated[str | None, Form()] = None,
+    label: Annotated[str | None, Form()] = None,
+    force: Annotated[bool, Form()] = False,
+):
+    try:
+        return document_uploads.create_document(
+            ctx,
+            filename=file.filename,
+            data=_read_upload(file),
+            title=title,
+            category=category,
+            product_type=product_type,
+            visibility=visibility,
+            allowed_roles=allowed_roles,
+            effective_from=effective_from,
+            label=label,
+            force=force,
+        )
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except DocumentTooLarge as exc:
+        raise HTTPException(413, str(exc)) from exc
+    except DocumentParseError as exc:
+        raise HTTPException(415, str(exc)) from exc
+    except document_uploads.DuplicateDocument as exc:
+        return _duplicate_response(exc)
+    except document_uploads.InvalidMetadata as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.post('/documents/{document_id}/versions', status_code=202)
+def create_document_version(
+    document_id: str,
+    ctx: SecurityContextDep,
+    file: Annotated[UploadFile, File()],
+    effective_from: Annotated[str | None, Form()] = None,
+    label: Annotated[str | None, Form()] = None,
+    force: Annotated[bool, Form()] = False,
+):
+    try:
+        return document_uploads.create_version(
+            ctx,
+            document_id,
+            filename=file.filename,
+            data=_read_upload(file),
+            effective_from=effective_from,
+            label=label,
+            force=force,
+        )
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except DocumentNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except DocumentTooLarge as exc:
+        raise HTTPException(413, str(exc)) from exc
+    except DocumentParseError as exc:
+        raise HTTPException(415, str(exc)) from exc
+    except document_uploads.DuplicateDocument as exc:
+        return _duplicate_response(exc)
+    except document_uploads.InvalidMetadata as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except document_uploads.InvalidState as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post('/documents/{document_id}/versions/{version_id}/retry', status_code=202)
+def retry_document_version(
+    document_id: str, version_id: str, ctx: SecurityContextDep
+):
+    try:
+        return document_uploads.retry_failed_version(ctx, document_id, version_id)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except DocumentNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except document_uploads.InvalidState as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.get('/documents/{document_id}')

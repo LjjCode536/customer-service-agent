@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api } from './client'
+import { api, upload } from './client'
 import { useRuntime } from '../store/useRuntime'
 import type {
   Approval,
@@ -8,6 +8,7 @@ import type {
   DashboardData,
   DocumentDetail,
   DocumentSummary,
+  DocumentUploadResponse,
   DocumentVersion,
   EvaluationReport,
   MockCase,
@@ -99,6 +100,15 @@ export function useDocument(documentId?: string, enabled = true) {
     queryKey: queryKeys.document(documentId),
     queryFn: () => api.get<DocumentDetail>(`/documents/${documentId}`),
     enabled: Boolean(documentId) && enabled,
+    // Poll only while a version is queued or being parsed, then stop.
+    refetchInterval: (query) => {
+      const versions = query.state.data?.versions ?? []
+      return versions.some(
+        (version) => version.status === 'draft' || version.status === 'processing',
+      )
+        ? 2_000
+        : false
+    },
   })
 }
 
@@ -107,6 +117,51 @@ export function useDocumentVersion(documentId?: string, versionId?: string, enab
     queryKey: queryKeys.documentVersion(documentId, versionId),
     queryFn: () => api.get<DocumentVersion>(`/documents/${documentId}/versions/${versionId}`),
     enabled: Boolean(documentId && versionId) && enabled,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status
+      return status === 'draft' || status === 'processing' ? 2_000 : false
+    },
+  })
+}
+
+/** Multipart document upload; the backend returns 202 and parses asynchronously. */
+export function useUploadDocument() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (formData: FormData) =>
+      upload<DocumentUploadResponse>('/documents', formData),
+    onSuccess: (data) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.documents })
+      void queryClient.invalidateQueries({ queryKey: queryKeys.document(data.document_id) })
+    },
+  })
+}
+
+export function useUploadDocumentVersion(documentId?: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (formData: FormData) => {
+      if (!documentId) throw new Error('document id is required for a new version')
+      return upload<DocumentUploadResponse>(`/documents/${documentId}/versions`, formData)
+    },
+    onSuccess: (data) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.documents })
+      void queryClient.invalidateQueries({ queryKey: queryKeys.document(data.document_id) })
+    },
+  })
+}
+
+export function useRetryDocumentVersion() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (input: { documentId: string; versionId: string }) =>
+      api.post<DocumentUploadResponse>(
+        `/documents/${input.documentId}/versions/${input.versionId}/retry`,
+      ),
+    onSuccess: (_data, input) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.documents })
+      void queryClient.invalidateQueries({ queryKey: queryKeys.document(input.documentId) })
+    },
   })
 }
 

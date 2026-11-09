@@ -124,6 +124,29 @@ def cache_document_embeddings(
         return cached
 
 
+def cache_version_embedding(
+    version: DocumentVersion,
+    document: Document | None,
+    *,
+    provider: ModelProvider | None = None,
+) -> bool:
+    """Compute and cache the full-text embedding for one document version.
+
+    The ingestion worker calls this after parsing, so an upload never has to
+    embed the whole catalogue or hold a request-scoped transaction.
+    """
+    provider = provider or get_provider()
+    return bool(
+        _cache_embeddings(
+            [version],
+            provider,
+            lambda candidate: document_version_text(candidate, document),
+            action='Embedding provider failed while ingesting a document version',
+            subject='document version',
+        )
+    )
+
+
 def retrieve(
     query: str,
     category: str | None = None,

@@ -105,6 +105,12 @@ Evidence 包含 `title / version / content / bm25_score / vector_score / rrf_sco
 
 解析是独立纯函数 seam（`backend/app/documents/parsing.py`）：文本优先 UTF-8、回退 GB18030、去除 BOM、统一换行；PDF 只提取文本层，加密 PDF 返回 `encrypted_pdf`，无文本层返回 `no_extractable_text`，明确不支持 OCR；DOCX 按正文顺序提取段落与表格，忽略图片、页眉与页脚。解析超过 `DOCUMENT_PARSE_TIMEOUT_SECONDS`（默认 60 秒）返回 `parse_timeout`；失败版本保留原文件，可直接重试而无需重新上传。
 
+## 发布、替换、回滚与归档
+
+`ready` 版本通过 `POST /api/v1/documents/{document_id}/versions/{version_id}/publish` 显式发布。发布前校验 `effective_from`、正文与整篇 embedding；模型或维度过期时在发布动作内重算，Provider 失败返回 `503` 且版本保持 `ready`。同一文档最多一个 Published Version：发布新版本会在同一事务内把旧版本改为 `superseded`，并发冲突返回 `409`；重新发布旧的 `superseded` 版本即完成回滚。
+
+版本级 `archive` / `restore` 用于人工下架单个已发布版本并恢复到 `ready`；文档级 `archive` / `restore` 停用或恢复整个文档，归档期间所有版本退出召回但状态保持不变。未来 `effective_from` 允许发布，到点前不参与召回。所有发布、替换、归档与恢复动作写入 Audit，写操作只允许 `manager`。
+
 ## 只读 Agent Loop
 
 `backend/app/services/agent_loop.py` 实现一个只读、有预算的 Agent Loop，用于意图不明确或多步只读查询。响应 `mode=agent_loop`，同时返回 `trace_id`、`stop_reason`、`handoff`、`steps`、`tool_calls`、`tokens_used` 与预算快照。
@@ -283,7 +289,7 @@ approval / idempotency`。评测在临时 SQLite 沙箱和 `OfflineProvider` 中
 ## 验证
 
 ```bash
-cd backend && python -m pytest -q          # 167 个测试，含上传入库、解析失败重试、RAG 召回与预算终止
+cd backend && python -m pytest -q          # 198 个测试，含上传入库、解析失败重试、发布回滚归档、RAG 召回与预算终止
 cd frontend && npm ci && npm run build     # TypeScript 类型检查 + 生产构建
 curl http://localhost:8000/api/v1/evaluation   # 5 个核心 Case + FAQ 的端到端评测
 docker compose up --build                  # API / Worker / 前端

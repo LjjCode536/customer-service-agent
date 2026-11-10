@@ -20,9 +20,14 @@ import type { UploadFile, UploadProps } from 'antd'
 import { PlusOutlined, RedoOutlined, ReloadOutlined } from '@ant-design/icons'
 import { downloadFile } from '../api/client'
 import {
+  useArchiveDocument,
+  useArchiveDocumentVersion,
   useDocument,
   useDocuments,
   useDocumentVersion,
+  usePublishDocumentVersion,
+  useRestoreDocument,
+  useRestoreDocumentVersion,
   useRetryDocumentVersion,
   useUploadDocument,
   useUploadDocumentVersion,
@@ -93,6 +98,12 @@ export default function Knowledge() {
   const uploadDocument = useUploadDocument()
   const uploadVersion = useUploadDocumentVersion(uploadTarget?.id)
   const retryVersion = useRetryDocumentVersion()
+  const publishVersion = usePublishDocumentVersion()
+  const archiveVersion = useArchiveDocumentVersion()
+  const restoreVersion = useRestoreDocumentVersion()
+  const archiveDocument = useArchiveDocument()
+  const restoreDocument = useRestoreDocument()
+  const [pendingAction, setPendingAction] = useState<string>()
   const uploadVisibility = Form.useWatch('visibility', uploadForm)
 
   const detail = useDocument(drawerDocumentId, Boolean(drawerDocumentId))
@@ -235,6 +246,73 @@ export default function Knowledge() {
     } catch (error) {
       toast.error(errorText(error))
     }
+  }
+
+  async function runVersionAction(
+    action: 'publish' | 'archive' | 'restore',
+    documentId: string,
+    version: DocumentVersion,
+  ) {
+    const key = `${action}:${version.id}`
+    setPendingAction(key)
+    try {
+      if (action === 'publish') {
+        await publishVersion.mutateAsync({ documentId, versionId: version.id })
+        toast.success(
+          version.status === 'superseded'
+            ? `已回滚到 ${versionLabel(version)}`
+            : `已发布 ${versionLabel(version)}`,
+        )
+      } else if (action === 'archive') {
+        await archiveVersion.mutateAsync({ documentId, versionId: version.id })
+        toast.success(`已下架 ${versionLabel(version)}，该版本退出召回`)
+      } else {
+        await restoreVersion.mutateAsync({ documentId, versionId: version.id })
+        toast.success(`${versionLabel(version)} 已恢复为 ready，可重新发布`)
+      }
+    } catch (error) {
+      toast.error(errorText(error))
+    } finally {
+      setPendingAction(undefined)
+    }
+  }
+
+  function confirmArchiveVersion(documentId: string, version: DocumentVersion) {
+    Modal.confirm({
+      title: `下架版本 ${versionLabel(version)}？`,
+      content: '下架后该版本立即退出召回，历史与原始文件保留，可恢复到 ready 后重新发布。',
+      okText: '下架',
+      okButtonProps: { danger: true },
+      onOk: () => runVersionAction('archive', documentId, version),
+    })
+  }
+
+  async function runDocumentAction(action: 'archive' | 'restore', documentId: string) {
+    const key = `document:${action}:${documentId}`
+    setPendingAction(key)
+    try {
+      if (action === 'archive') {
+        await archiveDocument.mutateAsync(documentId)
+        toast.success('文档已归档，所有版本退出召回')
+      } else {
+        await restoreDocument.mutateAsync(documentId)
+        toast.success('文档已恢复，原 published 版本重新具备召回资格')
+      }
+    } catch (error) {
+      toast.error(errorText(error))
+    } finally {
+      setPendingAction(undefined)
+    }
+  }
+
+  function confirmArchiveDocument(documentId: string) {
+    Modal.confirm({
+      title: '归档整个文档？',
+      content: '归档后该文档所有版本退出召回，版本状态保持不变；可随时恢复文档。',
+      okText: '归档',
+      okButtonProps: { danger: true },
+      onOk: () => runDocumentAction('archive', documentId),
+    })
   }
 
   const hasFilters = Boolean(keyword || category || status || productType || visibility)
@@ -396,10 +474,36 @@ export default function Knowledge() {
         open={Boolean(drawerDocumentId)}
         onClose={closeDrawer}
         extra={
-          detail.data && isManager && detail.data.status === 'active' ? (
-            <Button size="small" icon={<PlusOutlined />} onClick={() => openUpload(detail.data)}>
-              上传新版本
-            </Button>
+          detail.data && isManager ? (
+            <Space>
+              {detail.data.status === 'active' ? (
+                <>
+                  <Button
+                    size="small"
+                    icon={<PlusOutlined />}
+                    onClick={() => openUpload(detail.data)}
+                  >
+                    上传新版本
+                  </Button>
+                  <Button
+                    size="small"
+                    danger
+                    loading={pendingAction === `document:archive:${detail.data.id}`}
+                    onClick={() => confirmArchiveDocument(detail.data!.id)}
+                  >
+                    归档文档
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  size="small"
+                  loading={pendingAction === `document:restore:${detail.data.id}`}
+                  onClick={() => void runDocumentAction('restore', detail.data!.id)}
+                >
+                  恢复文档
+                </Button>
+              )}
+            </Space>
           ) : null
         }
       >
@@ -430,6 +534,14 @@ export default function Knowledge() {
                 {formatDateTime(detail.data.updated_at)}
               </Descriptions.Item>
             </Descriptions>
+
+            {detail.data.status === 'archived' ? (
+              <Alert
+                type="warning"
+                showIcon
+                title="文档已归档，所有版本退出召回；恢复文档后原 published 版本重新具备召回资格。"
+              />
+            ) : null}
 
             {hasPendingVersions ? (
               <Alert
@@ -481,8 +593,18 @@ export default function Knowledge() {
                 {
                   title: '生效时间',
                   dataIndex: 'effective_from',
-                  width: 120,
-                  render: (value?: string | null) => value || '-',
+                  width: 150,
+                  render: (value?: string | null) => {
+                    const future = value
+                      ? new Date(value).getTime() > Date.now()
+                      : false
+                    return (
+                      <Space size={4} wrap>
+                        <span>{value || '-'}</span>
+                        {future ? <Tag color="orange">未生效</Tag> : null}
+                      </Space>
+                    )
+                  },
                 },
                 {
                   title: '发布时间',
@@ -504,7 +626,7 @@ export default function Knowledge() {
                 },
                 {
                   title: '操作',
-                  width: 230,
+                  width: 330,
                   render: (_: unknown, row: DocumentVersion) => (
                     <Space size={4} wrap>
                       <Button size="small" onClick={() => setSelectedVersion(row.id)}>
@@ -517,6 +639,44 @@ export default function Knowledge() {
                       >
                         下载
                       </Button>
+                      {isManager && detail.data?.status === 'active' && row.status === 'ready' ? (
+                        <Button
+                          size="small"
+                          type="primary"
+                          loading={pendingAction === `publish:${row.id}`}
+                          onClick={() => void runVersionAction('publish', detail.data!.id, row)}
+                        >
+                          发布
+                        </Button>
+                      ) : null}
+                      {isManager && detail.data?.status === 'active' && row.status === 'superseded' ? (
+                        <Button
+                          size="small"
+                          loading={pendingAction === `publish:${row.id}`}
+                          onClick={() => void runVersionAction('publish', detail.data!.id, row)}
+                        >
+                          发布（回滚）
+                        </Button>
+                      ) : null}
+                      {isManager && detail.data?.status === 'active' && row.status === 'published' ? (
+                        <Button
+                          size="small"
+                          danger
+                          loading={pendingAction === `archive:${row.id}`}
+                          onClick={() => confirmArchiveVersion(detail.data!.id, row)}
+                        >
+                          下架
+                        </Button>
+                      ) : null}
+                      {isManager && detail.data?.status === 'active' && row.status === 'archived' ? (
+                        <Button
+                          size="small"
+                          loading={pendingAction === `restore:${row.id}`}
+                          onClick={() => void runVersionAction('restore', detail.data!.id, row)}
+                        >
+                          恢复
+                        </Button>
+                      ) : null}
                       {isManager && row.status === 'failed' ? (
                         <Button
                           size="small"

@@ -16,6 +16,10 @@
 - **Document（文档）**：知识的管理单元，承载租户、标题、分类、可见性与生命周期；一个文档拥有多个版本，同一时刻最多一个已发布版本。
 - **Document Version（文档版本）**：文档的一次不可变内容快照，包含原始文件、解析正文与版本号；发布后不可修改，修改必须生成新版本。
 - **Published Version（已发布版本）**：已完成解析、允许参与召回的文档版本；同一文档同一时刻最多一个。
+- **Superseded Version（被替换版本）**：被新发布版本替换后退出召回的旧版本；重新发布该版本即完成回滚。
+- **Version Lifecycle（版本生命周期）**：`draft → processing → ready → published`；`published` 可被新版本替换为 `superseded`，也可人工下架为 `archived`；`archived` 可恢复为 `ready`；失败版本可重试。
+- **Rollback（回滚）**：重新发布旧的 `superseded` 版本，使其重新成为 Published Version，并把当前版本替换为 `superseded`。
+- **Archive（归档）**：版本级归档只停用单个已发布版本；文档级归档停用整个文档，版本状态保持不变，恢复文档后原 Published Version 重新具备召回资格。
 - **Visibility（可见性）**：文档的读取范围，分为 `tenant`（租户内全员）、`staff_only`（客服与管理员）、`restricted`（按 `allowed_roles` 显式授权）。
 - **Ingestion（入库）**：把文档版本解析并转化为可检索知识的过程。
 

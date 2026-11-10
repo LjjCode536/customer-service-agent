@@ -35,6 +35,7 @@ from app.db.models import (
     Ticket,
     TraceStep,
 )
+from app.documents import lifecycle as document_lifecycle
 from app.documents import uploads as document_uploads
 from app.documents.catalog import (
     DocumentNotFound,
@@ -44,6 +45,7 @@ from app.documents.catalog import (
     list_documents,
     read_version_source,
 )
+from app.documents.errors import InvalidState as DocumentInvalidState
 from app.documents.parsing import (
     MAX_DOCUMENT_BYTES,
     SUPPORTED_MIME_TYPES,
@@ -339,7 +341,7 @@ def create_document_version(
         return _duplicate_response(exc)
     except document_uploads.InvalidMetadata as exc:
         raise HTTPException(422, str(exc)) from exc
-    except document_uploads.InvalidState as exc:
+    except DocumentInvalidState as exc:
         raise HTTPException(400, str(exc)) from exc
 
 
@@ -353,7 +355,77 @@ def retry_document_version(
         raise HTTPException(403, str(exc)) from exc
     except DocumentNotFound as exc:
         raise HTTPException(404, str(exc)) from exc
-    except document_uploads.InvalidState as exc:
+    except DocumentInvalidState as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post('/documents/{document_id}/versions/{version_id}/publish')
+def publish_document_version(
+    document_id: str, version_id: str, ctx: SecurityContextDep
+):
+    try:
+        return document_lifecycle.publish_version(ctx, document_id, version_id)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except DocumentNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except DocumentInvalidState as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except document_lifecycle.PublishConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ProviderError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@router.post('/documents/{document_id}/versions/{version_id}/archive')
+def archive_document_version(
+    document_id: str, version_id: str, ctx: SecurityContextDep
+):
+    try:
+        return document_lifecycle.archive_version(ctx, document_id, version_id)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except DocumentNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except DocumentInvalidState as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post('/documents/{document_id}/versions/{version_id}/restore')
+def restore_document_version(
+    document_id: str, version_id: str, ctx: SecurityContextDep
+):
+    try:
+        return document_lifecycle.restore_version(ctx, document_id, version_id)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except DocumentNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except DocumentInvalidState as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post('/documents/{document_id}/archive')
+def archive_document(document_id: str, ctx: SecurityContextDep):
+    try:
+        return document_lifecycle.archive_document(ctx, document_id)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except DocumentNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except DocumentInvalidState as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post('/documents/{document_id}/restore')
+def restore_document(document_id: str, ctx: SecurityContextDep):
+    try:
+        return document_lifecycle.restore_document(ctx, document_id)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except DocumentNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except DocumentInvalidState as exc:
         raise HTTPException(400, str(exc)) from exc
 
 

@@ -180,13 +180,12 @@ def get_document(ctx: SecurityContext, document_id: str) -> dict[str, Any]:
     }
 
 
-def _load_version(
-    ctx: SecurityContext,
+def load_version(
     session,
-    document_id: str,
+    document: Document,
     version_id: str,
-) -> tuple[Document, DocumentVersion]:
-    document = load_document(ctx, session, document_id)
+) -> DocumentVersion:
+    """Load one version after the caller has tenant-scoped the document."""
     version = session.scalar(
         select(DocumentVersion).where(
             DocumentVersion.id == version_id,
@@ -195,7 +194,7 @@ def _load_version(
     )
     if version is None:
         raise DocumentNotFound(f'Document version {version_id} not found')
-    return document, version
+    return version
 
 
 def get_version(
@@ -203,7 +202,8 @@ def get_version(
 ) -> dict[str, Any]:
     """Return one version including its parsed text."""
     with use_session() as session:
-        document, version = _load_version(ctx, session, document_id, version_id)
+        document = load_document(ctx, session, document_id)
+        version = load_version(session, document, version_id)
         data = version_dict(version, include_content=True)
     data['document_title'] = document.title
     data['category'] = document.category
@@ -217,7 +217,8 @@ def read_version_source(
 ) -> tuple[DocumentVersion, bytes]:
     """Load the immutable source file for a version after tenant scoping."""
     with use_session() as session:
-        _document, version = _load_version(ctx, session, document_id, version_id)
+        document = load_document(ctx, session, document_id)
+        version = load_version(session, document, version_id)
         if not version.storage_key:
             raise DocumentNotFound(f'Document version {version_id} has no source file')
         try:

@@ -6,6 +6,7 @@ import type {
   BadCase,
   ChatResponse,
   DashboardData,
+  DocumentActionResponse,
   DocumentDetail,
   DocumentSummary,
   DocumentUploadResponse,
@@ -17,6 +18,7 @@ import type {
   TaskRecord,
   Ticket,
   TraceStep,
+  VersionActionResponse,
 } from './types'
 
 export const queryKeys = {
@@ -161,6 +163,67 @@ export function useRetryDocumentVersion() {
     onSuccess: (_data, input) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.documents })
       void queryClient.invalidateQueries({ queryKey: queryKeys.document(input.documentId) })
+    },
+  })
+}
+
+export function usePublishDocumentVersion() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (input: { documentId: string; versionId: string }) =>
+      api.post<VersionActionResponse>(
+        `/documents/${input.documentId}/versions/${input.versionId}/publish`,
+      ),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.documents })
+    },
+  })
+}
+
+export function useArchiveDocumentVersion() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (input: { documentId: string; versionId: string }) =>
+      api.post<VersionActionResponse>(
+        `/documents/${input.documentId}/versions/${input.versionId}/archive`,
+      ),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.documents })
+    },
+  })
+}
+
+export function useRestoreDocumentVersion() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (input: { documentId: string; versionId: string }) =>
+      api.post<VersionActionResponse>(
+        `/documents/${input.documentId}/versions/${input.versionId}/restore`,
+      ),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.documents })
+    },
+  })
+}
+
+export function useArchiveDocument() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (documentId: string) =>
+      api.post<DocumentActionResponse>(`/documents/${documentId}/archive`),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.documents })
+    },
+  })
+}
+
+export function useRestoreDocument() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (documentId: string) =>
+      api.post<DocumentActionResponse>(`/documents/${documentId}/restore`),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.documents })
     },
   })
 }

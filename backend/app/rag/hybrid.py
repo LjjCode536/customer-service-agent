@@ -48,15 +48,8 @@ def _cache_embeddings(
     action: str,
     subject: str,
 ) -> int:
-    model = _embedding_model(provider)
-    dimensions = getattr(provider, 'embedding_dimensions', None)
-    pending = [
-        row
-        for row in rows
-        if not row.embedding
-        or row.embedding_model != model
-        or (dimensions and len(row.embedding) != dimensions)
-    ]
+    model = embedding_model_name(provider)
+    pending = [row for row in rows if not embedding_is_current(row, provider)]
     if not pending:
         return 0
     vectors = _call_provider(
@@ -169,7 +162,7 @@ def retrieve(
 
     query_vector = _embed_query(provider, query)
     _score_bm25(query, docs)
-    _score_vectors(query_vector, docs, _embedding_model(provider))
+    _score_vectors(query_vector, docs, embedding_model_name(provider))
 
     candidate_limit = max(CANDIDATE_LIMIT, (top_n or 1) * 2)
     bm25_candidates = sorted(
@@ -237,7 +230,7 @@ def _load_active_docs(
         ).all()
     docs = []
     for version, document in rows:
-        effective_from = _parse_effective_from(version.effective_from)
+        effective_from = parse_effective_from(version.effective_from)
         if effective_from is None or effective_from > now:
             continue
         if category and document.category != category:
@@ -253,7 +246,7 @@ def _load_active_docs(
     return docs
 
 
-def _parse_effective_from(value: str | None) -> datetime | None:
+def parse_effective_from(value: str | None) -> datetime | None:
     if not value:
         return None
     text = str(value).strip()
@@ -271,8 +264,16 @@ def _parse_effective_from(value: str | None) -> datetime | None:
     return parsed
 
 
-def _embedding_model(provider: ModelProvider) -> str:
+def embedding_model_name(provider: ModelProvider) -> str:
     return getattr(provider, 'embedding_model', None) or settings.model_embedding_model
+
+
+def embedding_is_current(row: Any, provider: ModelProvider) -> bool:
+    """Shared staleness predicate for ingestion, publishing, and caching."""
+    dimensions = getattr(provider, 'embedding_dimensions', None)
+    if not row.embedding or row.embedding_model != embedding_model_name(provider):
+        return False
+    return not (dimensions and len(row.embedding) != dimensions)
 
 
 def _call_provider(action: str, call):

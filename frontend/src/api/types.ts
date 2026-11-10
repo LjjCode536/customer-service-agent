@@ -122,6 +122,24 @@ export interface DocumentUploadResponse {
   label?: string | null
 }
 
+export interface VersionActionResponse {
+  document_id: string
+  version_id: string
+  version_number: number
+  label?: string | null
+  status: string
+  document_status: string
+  effective_from?: string | null
+  published_at?: string | null
+  superseded_version_id?: string | null
+}
+
+export interface DocumentActionResponse {
+  document_id: string
+  status: string
+  published_version_id?: string | null
+}
+
 export interface TraceStep {
   id: number
   trace_id?: string | null

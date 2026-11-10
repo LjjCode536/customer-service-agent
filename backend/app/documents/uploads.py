@@ -20,6 +20,7 @@ from app.core.security import SecurityContext
 from app.db.database import session_scope, utcnow
 from app.db.models import Document, DocumentVersion
 from app.documents.catalog import DocumentNotFound, load_document
+from app.documents.errors import InvalidState, require_manager
 from app.documents.parsing import mime_type_for, validate_upload
 from app.documents.storage import StoredSource, store_bytes
 from app.services.tasking import record_audit
@@ -32,10 +33,6 @@ MAX_METADATA_LENGTH = 64
 
 class InvalidMetadata(ValueError):
     """Raised when upload metadata fails validation (HTTP 422)."""
-
-
-class InvalidState(ValueError):
-    """Raised when a state transition is not allowed (HTTP 400)."""
 
 
 class DuplicateDocument(Exception):
@@ -66,7 +63,7 @@ def create_document(
     label: str | None = None,
     force: bool = False,
 ) -> dict:
-    _require_manager(ctx)
+    require_manager(ctx)
     display_name = _display_filename(filename)
     title = _required_text(title, 'title', MAX_TITLE_LENGTH)
     category = _optional_text(category, 'category', MAX_METADATA_LENGTH)
@@ -123,7 +120,7 @@ def create_version(
     label: str | None = None,
     force: bool = False,
 ) -> dict:
-    _require_manager(ctx)
+    require_manager(ctx)
     display_name = _display_filename(filename)
     effective = _normalize_effective_from(effective_from)
     label = _optional_text(label, 'label', MAX_METADATA_LENGTH)
@@ -165,7 +162,7 @@ def create_version(
 def retry_failed_version(
     ctx: SecurityContext, document_id: str, version_id: str
 ) -> dict:
-    _require_manager(ctx)
+    require_manager(ctx)
     with session_scope() as session:
         document = load_document(ctx, session, document_id)
         version = session.scalar(
@@ -200,11 +197,6 @@ def retry_failed_version(
         )
         session.flush()
         return _version_payload(document, version)
-
-
-def _require_manager(ctx: SecurityContext) -> None:
-    if ctx.role != 'manager':
-        raise PermissionError('Only managers can upload, retry, or change documents.')
 
 
 def _duplicate_version(

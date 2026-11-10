@@ -47,7 +47,11 @@ const visibilityColor: Record<string, string> = {
 }
 
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024
-const UPLOAD_ACCEPT = '.txt,.md'
+const UPLOAD_FORMATS = ['txt', 'md', 'pdf', 'docx'] as const
+const UPLOAD_ACCEPT = UPLOAD_FORMATS.map((extension) => `.${extension}`).join(',')
+const UPLOAD_DOTTED_LABEL = UPLOAD_FORMATS.map((extension) => `.${extension}`).join(' / ')
+const UPLOAD_FORMAT_LABEL = UPLOAD_FORMATS.join(' / ')
+const UPLOAD_PATTERN = new RegExp(`\\.(${UPLOAD_FORMATS.join('|')})$`, 'i')
 const VISIBILITY_OPTIONS = ['tenant', 'staff_only', 'restricted'].map((value) => ({
   value,
   label: value,
@@ -159,8 +163,8 @@ export default function Knowledge() {
   }
 
   const beforeUpload: UploadProps['beforeUpload'] = (file) => {
-    if (!/\.(txt|md)$/i.test(file.name)) {
-      toast.error('仅支持 .txt / .md 文件')
+    if (!UPLOAD_PATTERN.test(file.name)) {
+      toast.error(`仅支持 ${UPLOAD_DOTTED_LABEL} 文件`)
       return Upload.LIST_IGNORE
     }
     if (file.size > MAX_UPLOAD_BYTES) {
@@ -181,7 +185,7 @@ export default function Knowledge() {
     const fileList = (values.file as UploadFile[] | undefined) ?? []
     const file = fileList[0]?.originFileObj
     if (!file) {
-      toast.error('请选择 txt / md 文件')
+      toast.error(`请选择 ${UPLOAD_FORMAT_LABEL} 文件`)
       return
     }
 
@@ -243,7 +247,7 @@ export default function Knowledge() {
             Knowledge Center
           </Typography.Title>
           <Typography.Text type="secondary">
-            文档目录按分类与文档 ID 排列；manager 可上传 txt / md，提交后由 Worker 异步解析。
+            文档目录按分类与文档 ID 排列；manager 可上传 {UPLOAD_FORMAT_LABEL}，提交后由 Worker 异步解析。
           </Typography.Text>
         </div>
         <Space>
@@ -554,10 +558,10 @@ export default function Knowledge() {
               label="文件"
               valuePropName="fileList"
               getValueFromEvent={normFile}
-              rules={[{ required: true, message: '请选择 txt / md 文件' }]}
+              rules={[{ required: true, message: `请选择 ${UPLOAD_FORMAT_LABEL} 文件` }]}
             >
               <Upload accept={UPLOAD_ACCEPT} maxCount={1} beforeUpload={beforeUpload}>
-                <Button icon={<PlusOutlined />}>选择 txt / md 文件</Button>
+                <Button icon={<PlusOutlined />}>选择 {UPLOAD_FORMAT_LABEL} 文件</Button>
               </Upload>
             </Form.Item>
 

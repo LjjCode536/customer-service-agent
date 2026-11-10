@@ -11,6 +11,7 @@ from app.documents.parsing import parse_document
 from app.llm.provider import ProviderError, set_provider
 from app.main import app
 from app.worker import run_once
+from tests.binary_fixtures import build_docx, build_encrypted_pdf, build_pdf
 from tests.fakes import DeterministicProvider
 
 MANAGER = {
@@ -160,8 +161,11 @@ def test_cross_tenant_version_writes_are_404(seeded_db):
 def test_upload_rejects_unsupported_oversized_and_binary_files(seeded_db, monkeypatch):
     client = TestClient(app)
 
-    unsupported = _upload(client, filename='policy.pdf', content=b'%PDF-1.7')
+    unsupported = _upload(client, filename='policy.xlsx', content=b'PK\x03\x04')
     assert unsupported.status_code == 415
+
+    disguised_pdf = _upload(client, filename='policy.pdf', content=b'not a pdf')
+    assert disguised_pdf.status_code == 415
 
     binary = _upload(client, content=b'\x00\x01\x02not-text')
     assert binary.status_code == 415
@@ -199,6 +203,128 @@ def test_worker_ingests_uploaded_text_to_ready(seeded_db, fake_provider):
     assert download.content == content
 
     assert _audit_actions('version.failed') == []
+
+
+def test_worker_ingests_pdf_and_docx_to_ready(seeded_db, fake_provider):
+    client = TestClient(app)
+    pdf_body = _upload(
+        client,
+        filename='policy.pdf',
+        content=build_pdf('PDF policy body.'),
+    ).json()
+    docx_body = _upload(
+        client,
+        filename='policy.docx',
+        content=build_docx(
+            [
+                ('p', '退款总则'),
+                ('table', [['商品', '政策'], ['耳机', '七天可退']]),
+                ('p', '补充说明'),
+            ]
+        ),
+    ).json()
+
+    assert run_once() is True
+    assert run_once() is True
+
+    pdf_version = _version(client, pdf_body['document_id'], pdf_body['version_id']).json()
+    assert pdf_version['status'] == 'ready'
+    assert pdf_version['content_text'].strip() == 'PDF policy body.'
+    assert pdf_version['mime_type'] == 'application/pdf'
+    assert pdf_version['error_code'] is None
+
+    docx_version = _version(
+        client, docx_body['document_id'], docx_body['version_id']
+    ).json()
+    assert docx_version['status'] == 'ready'
+    assert docx_version['content_text'] == (
+        '退款总则\n商品 | 政策\n耳机 | 七天可退\n补充说明'
+    )
+    assert docx_version['mime_type'] == (
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    )
+    assert docx_version['error_code'] is None
+
+    pdf_download = client.get(
+        f"/api/v1/documents/{pdf_body['document_id']}/versions/"
+        f"{pdf_body['version_id']}/download",
+        headers=MANAGER,
+    )
+    assert pdf_download.headers['content-disposition'].startswith(
+        f'attachment; filename="{pdf_body["version_id"]}.pdf"'
+    )
+    docx_download = client.get(
+        f"/api/v1/documents/{docx_body['document_id']}/versions/"
+        f"{docx_body['version_id']}/download",
+        headers=MANAGER,
+    )
+    assert docx_download.headers['content-disposition'].startswith(
+        f'attachment; filename="{docx_body["version_id"]}.docx"'
+    )
+
+
+@pytest.mark.parametrize(
+    ('filename', 'content', 'error_code'),
+    [
+        ('policy.pdf', build_pdf(''), 'no_extractable_text'),
+        ('policy.docx', build_docx([('p', '   ')]), 'no_extractable_text'),
+    ],
+)
+def test_binary_documents_without_text_fail_explicitly(
+    seeded_db, filename, content, error_code
+):
+    client = TestClient(app)
+    body = _upload(client, filename=filename, content=content).json()
+
+    assert run_once() is True
+
+    version = _version(client, body['document_id'], body['version_id']).json()
+    assert version['status'] == 'failed'
+    assert version['error_code'] == error_code
+    assert version['error_message']
+    assert version['content_text'] is None
+    assert _audit_actions('version.failed')[-1][1]['error_code'] == error_code
+
+
+def test_encrypted_pdf_retries_without_reuploading_or_copying_the_file(seeded_db):
+    client = TestClient(app)
+    content = build_encrypted_pdf()
+    body = _upload(client, filename='policy.pdf', content=content).json()
+
+    assert run_once() is True
+
+    failed = _version(client, body['document_id'], body['version_id']).json()
+    assert failed['status'] == 'failed'
+    assert failed['error_code'] == 'encrypted_pdf'
+    assert 'encrypted' in failed['error_message'].lower()
+
+    download = client.get(
+        f"/api/v1/documents/{body['document_id']}/versions/{body['version_id']}/download",
+        headers=MANAGER,
+    )
+    assert download.status_code == 200
+    assert download.content == content
+
+    with session_scope() as session:
+        before = session.get(DocumentVersion, body['version_id'])
+        storage_key = before.storage_key
+
+    retry = client.post(
+        f"/api/v1/documents/{body['document_id']}/versions/{body['version_id']}/retry",
+        headers=MANAGER,
+    )
+    assert retry.status_code == 202
+    assert retry.json()['status'] == 'draft'
+
+    with session_scope() as session:
+        after = session.get(DocumentVersion, body['version_id'])
+        assert after.storage_key == storage_key
+        assert after.checksum == body['checksum']
+
+    assert run_once() is True
+    still_failed = _version(client, body['document_id'], body['version_id']).json()
+    assert still_failed['status'] == 'failed'
+    assert still_failed['error_code'] == 'encrypted_pdf'
 
 
 def test_duplicate_checksum_is_409_and_force_allows_new_document_or_version(

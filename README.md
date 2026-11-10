@@ -95,7 +95,7 @@ Evidence 包含 `title / version / content / bm25_score / vector_score / rrf_sco
 
 ## 文档上传与入库
 
-`manager` 可在 Knowledge Center 上传 `.txt` / `.md`，或为已有文档上传新版本。`POST /api/v1/documents` 与 `POST /api/v1/documents/{document_id}/versions` 立即返回 `202`，前后端都不等待解析：
+`manager` 可在 Knowledge Center 上传 `.txt` / `.md` / `.pdf` / `.docx`，或为已有文档上传新版本。`POST /api/v1/documents` 与 `POST /api/v1/documents/{document_id}/versions` 立即返回 `202`，前后端都不等待解析：
 
 - 原始文件按 SHA-256 内容寻址写入 `DOCUMENT_STORAGE_DIR`（默认 `./data/documents`；Compose 挂载在 `/app/data` volume）；原始文件名只用于展示。
 - 单文件上限 20MB，扩展名与文件头双重校验；不支持格式返回 `415`，超大文件返回 `413`。
@@ -103,7 +103,7 @@ Evidence 包含 `title / version / content / bm25_score / vector_score / rrf_sco
 - 同租户相同 SHA-256 返回 `409` 与已存在文档信息；`force=true` 允许作为新文档或新版本继续。
 - 上传、版本创建、解析失败与重试均写 Audit；写操作只允许 `manager`，跨租户返回 `404`。
 
-解析是独立纯函数 seam（`backend/app/documents/parsing.py`）：UTF-8 优先、GB18030 回退、去除 BOM、统一换行；PDF / DOCX 在后续阶段接入同一 seam。
+解析是独立纯函数 seam（`backend/app/documents/parsing.py`）：文本优先 UTF-8、回退 GB18030、去除 BOM、统一换行；PDF 只提取文本层，加密 PDF 返回 `encrypted_pdf`，无文本层返回 `no_extractable_text`，明确不支持 OCR；DOCX 按正文顺序提取段落与表格，忽略图片、页眉与页脚。解析超过 `DOCUMENT_PARSE_TIMEOUT_SECONDS`（默认 60 秒）返回 `parse_timeout`；失败版本保留原文件，可直接重试而无需重新上传。
 
 ## 只读 Agent Loop
 

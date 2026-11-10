@@ -4,6 +4,7 @@ uvicorn[standard]==0.48.0
 pydantic==2.13.4
 pydantic-settings==2.14.1
 httpx==0.28.1
+pypdf==6.4.0
 jieba==0.42.1
 numpy==2.4.6
 rank-bm25==0.2.2

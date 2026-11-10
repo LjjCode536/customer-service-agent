@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from typing import Annotated
 from urllib.parse import quote
 
@@ -45,6 +46,7 @@ from app.documents.catalog import (
 )
 from app.documents.parsing import (
     MAX_DOCUMENT_BYTES,
+    SUPPORTED_MIME_TYPES,
     DocumentParseError,
     DocumentTooLarge,
 )
@@ -380,7 +382,10 @@ def download_document_version(
     except DocumentNotFound as exc:
         raise HTTPException(404, str(exc)) from exc
     filename = (version.source_filename or f'{version.id}.txt').replace('"', '')
-    ascii_name = f'{version.id}.txt'
+    extension = Path(filename).suffix.lower()
+    if extension not in SUPPORTED_MIME_TYPES:
+        extension = '.bin'
+    ascii_name = f'{version.id}{extension}'
     disposition = (
         f'attachment; filename="{ascii_name}"; '
         f"filename*=UTF-8''{quote(filename)}"

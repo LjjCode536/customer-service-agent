@@ -13,7 +13,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from app.core.security import SecurityContext
+from app.core.security import SecurityContext, can_read_visibility
 from app.db.database import use_session
 from app.db.models import Document, DocumentVersion
 from app.documents.storage import DocumentStorageError, read_source
@@ -21,6 +21,23 @@ from app.documents.storage import DocumentStorageError, read_source
 
 class DocumentNotFound(Exception):
     """Raised when a document, version, or source file is absent for this tenant."""
+
+
+class DocumentAccessDenied(PermissionError):
+    """Raised when a document exists in the tenant but its Visibility denies the caller."""
+
+
+def document_is_visible(ctx: SecurityContext, document: Document) -> bool:
+    """Single Visibility predicate shared by every read path."""
+    return can_read_visibility(ctx, document.visibility, document.allowed_roles)
+
+
+def ensure_readable(ctx: SecurityContext, document: Document) -> None:
+    """Reject a same-tenant read that the caller's role may not see (HTTP 403)."""
+    if not document_is_visible(ctx, document):
+        raise DocumentAccessDenied(
+            f'Document {document.id} is not visible to role {ctx.role!r}.'
+        )
 
 
 def _datetime_text(value: Any) -> Any:
@@ -136,6 +153,8 @@ def list_documents(
 
     rows = []
     for document in documents:
+        if not document_is_visible(ctx, document):
+            continue
         versions = versions_by_document.get(document.id, [])
         if status and document.status != status:
             continue
@@ -167,6 +186,7 @@ def get_document(ctx: SecurityContext, document_id: str) -> dict[str, Any]:
     """Return one document plus its full version history."""
     with use_session() as session:
         document = load_document(ctx, session, document_id)
+        ensure_readable(ctx, document)
         versions = list(
             session.scalars(
                 select(DocumentVersion)
@@ -203,6 +223,7 @@ def get_version(
     """Return one version including its parsed text."""
     with use_session() as session:
         document = load_document(ctx, session, document_id)
+        ensure_readable(ctx, document)
         version = load_version(session, document, version_id)
         data = version_dict(version, include_content=True)
     data['document_title'] = document.title
@@ -218,6 +239,7 @@ def read_version_source(
     """Load the immutable source file for a version after tenant scoping."""
     with use_session() as session:
         document = load_document(ctx, session, document_id)
+        ensure_readable(ctx, document)
         version = load_version(session, document, version_id)
         if not version.storage_key:
             raise DocumentNotFound(f'Document version {version_id} has no source file')
@@ -248,7 +270,9 @@ def knowledge_rows(ctx: SecurityContext) -> list[dict[str, Any]]:
             )
         ).all()
     return [
-        version_to_evidence(version, document) for version, document in rows
+        version_to_evidence(version, document)
+        for version, document in rows
+        if document_is_visible(ctx, document)
     ]
 
 

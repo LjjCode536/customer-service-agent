@@ -85,9 +85,9 @@ MODEL_CHAT_MODEL=deepseek-chat
 
 FAQ 请求走真实检索链路（`backend/app/rag/hybrid.py`）：
 
-1. 只加载 `status=active` 且 `effective_from <= now` 的知识版本。
+1. 只加载调用者租户内 `status=active`、版本 `published`、`effective_from <= now` 且 Visibility 允许当前角色的 Published Version。
 2. `jieba` 分词后，用 `rank_bm25` 的 `BM25Okapi` 做词法召回。
-3. 用 BGE-M3 计算 query 向量，与入库时缓存的 Knowledge embedding 做 numpy cosine 召回。
+3. 用 BGE-M3 计算 query 向量，与入库时缓存的 Document Version embedding 做 numpy cosine 召回。
 4. 两路各取候选，用 RRF（`k=60`）按排名融合。
 5. 融合候选交给 BGE Reranker Cross-Encoder 精排，返回稳定排序的 Evidence。
 
@@ -110,6 +110,25 @@ Evidence 包含 `title / version / content / bm25_score / vector_score / rrf_sco
 `ready` 版本通过 `POST /api/v1/documents/{document_id}/versions/{version_id}/publish` 显式发布。发布前校验 `effective_from`、正文与整篇 embedding；模型或维度过期时在发布动作内重算，Provider 失败返回 `503` 且版本保持 `ready`。同一文档最多一个 Published Version：发布新版本会在同一事务内把旧版本改为 `superseded`，并发冲突返回 `409`；重新发布旧的 `superseded` 版本即完成回滚。
 
 版本级 `archive` / `restore` 用于人工下架单个已发布版本并恢复到 `ready`；文档级 `archive` / `restore` 停用或恢复整个文档，归档期间所有版本退出召回但状态保持不变。未来 `effective_from` 允许发布，到点前不参与召回。所有发布、替换、归档与恢复动作写入 Audit，写操作只允许 `manager`。
+
+## 权限、可见性与服务身份
+
+文档列表、详情、版本正文、原文件下载、`/api/v1/knowledge`、FAQ、Agent Loop 与 Workflow 召回使用同一套 Visibility 策略（`backend/app/core/security.py`）：
+
+| 操作 | customer | agent | manager | service |
+|---|---|---|---|---|
+| 读取 `tenant` 文档 | 允许 | 允许 | 允许 | 允许 |
+| 读取 `staff_only` 文档 | 禁止 | 允许 | 允许 | 允许 |
+| 读取 `restricted` 文档 | 仅 `allowed_roles` 命中 | 仅 `allowed_roles` 命中 | 仅 `allowed_roles` 命中 | 允许 |
+| 上传 / 发布 / 归档 / 恢复 / 重试 | 禁止 | 禁止 | 允许 | 禁止 |
+| 下载原文件 | 按读取权限 | 按读取权限 | 按读取权限 | 按读取权限 |
+
+- 所有文档查询都带 `tenant_id`；跨租户一律 `404`，不暴露存在性。同租户但 Visibility 拒绝时，详情与下载返回 `403`；列表与召回直接过滤。
+- 写操作严格只给 `manager`；Knowledge Center 只对 `manager` 显示写按钮，后端仍是权限边界。
+- `service` 是 Workflow 的内部身份，只能由 `service_context()` 构造，HTTP 请求头传入 `service` 或未知角色会返回 `403`。
+- Workflow 的 `retrieve_policy` 使用 `service` 身份在任务租户内检索 `staff_only` SOP；其 Trace 输出、节点事件与交给 LLM 的证据只保留标题、版本和分数。
+- 客户可见的 task result / trace 不保存 `staff_only` 正文；`GET /api/v1/knowledge` 也只返回调用者可见的 Published Version。
+- seed 后 `DOC-LOGISTICS-SOP` 为 `staff_only`，`DOC-REFUND-ELECTRONICS` 与 `DOC-INVOICE` 为 `tenant`。升级已有本地数据库后需重新执行 `python -m app.scripts_seed`，否则不会获得新的可见性行为。
 
 ## 只读 Agent Loop
 
@@ -154,7 +173,8 @@ DATABASE_URL=postgresql://user:password@localhost:5432/customer_service
 - seed 在单个事务内清空并重建演示数据，可重复执行。
 - 退款幂等键有 UNIQUE 约束，写入使用 `ON CONFLICT DO NOTHING` 语义。
 - Task 状态、审批顺序、Trace 查询、工单查询等热点路径都有索引；多步写入使用 `session_scope()` 事务。
-- Knowledge 在 seed 入库时批量计算并缓存 `embedding`、`embedding_model`、`embedding_generated_at`；模型标识变化时自动重算，查询时只计算 query 向量。
+- Document Version 在 seed 入库时批量计算并缓存 `embedding`、`embedding_model`、`embedding_dimensions`、`embedding_generated_at`；模型标识变化时自动重算，查询时只计算 query 向量。
+- `python -m app.scripts_seed` 会清空并重建演示数据，包括 Document / Document Version、`visibility` 与 `allowed_roles`；权限或 seed 映射变化后执行一次即可。
 
 退款 Workflow 由 LangGraph 主路径执行，`human_review` 节点用 `interrupt()` 暂停，checkpoint 默认写入 `{DATABASE_PATH}.checkpoints`（SQLite）或 `./data/checkpoints.db`（非 SQLite），可用 `CHECKPOINT_PATH` 覆盖。审批全部通过后 Task 进入 `resume_pending`，Worker 以 `Command(resume=...)` 从暂停点继续。`WORKFLOW_ENGINE=fallback` 只用于测试或 LangGraph 不可用时的显式降级，默认不会静默回退。
 
@@ -289,7 +309,7 @@ approval / idempotency`。评测在临时 SQLite 沙箱和 `OfflineProvider` 中
 ## 验证
 
 ```bash
-cd backend && python -m pytest -q          # 198 个测试，含上传入库、解析失败重试、发布回滚归档、RAG 召回与预算终止
+cd backend && python -m pytest -q          # 211 个测试，含权限矩阵、上传入库、解析失败重试、发布回滚归档、RAG 召回与预算终止
 cd frontend && npm ci && npm run build     # TypeScript 类型检查 + 生产构建
 curl http://localhost:8000/api/v1/evaluation   # 5 个核心 Case + FAQ 的端到端评测
 docker compose up --build                  # API / Worker / 前端
@@ -320,7 +340,7 @@ docker compose up --build                  # API / Worker / 前端
 
 ## 已知限制
 
-- 教学版单租户、单 Worker，未做 RBAC 与多副本调度
+- 已做请求头 Security Context + 角色级 RBAC / Visibility；未做真实登录、SSO、用户级 ACL 与多副本调度
 - SQLite 为默认存储；Postgres 通过 `DATABASE_URL` 切换。SQLite checkpointer 只适合单 Worker，多副本需换 Postgres checkpointer
 - Docker Compose 默认使用显式离线 Provider，便于无 key 启动；真实检索质量依赖 SiliconFlow 的可用性与免费额度
 - 没有 Alembic，修改已有表结构需要重建本地 SQLite 或手工迁移

@@ -1,6 +1,6 @@
 """Shared write-side errors and permission checks for document management."""
 
-from app.core.security import SecurityContext
+from app.core.security import WRITE_ROLES, SecurityContext
 
 
 class InvalidState(ValueError):
@@ -8,7 +8,7 @@ class InvalidState(ValueError):
 
 
 def require_manager(ctx: SecurityContext) -> None:
-    if ctx.role != 'manager':
+    if ctx.role not in WRITE_ROLES:
         raise PermissionError(
             'Only managers can upload, publish, archive, restore, or retry documents.'
         )

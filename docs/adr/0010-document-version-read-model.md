@@ -22,4 +22,4 @@ ADR-0009 落定 Document / Document Version 持久化时，召回与 `/api/v1/kn
 
 - 旧本地 SQLite 数据库中的 `knowledge` 行不再影响行为；重新 seed 即可得到文档目录。
 - `keywords` 不再由 Document Version 提供，兼容读模型与 Evidence 返回空列表；词法召回继续依赖标题、版本 label 与正文。
-- 角色级 Visibility 校验（`staff_only` / `restricted`）与 Workflow `service` 身份留给后续权限 ticket；本阶段只保证租户隔离与召回状态/生效时间过滤。
+- 角色级 Visibility 校验（`staff_only` / `restricted`）与 Workflow `service` 身份由 ADR-0014 补齐；本阶段只保证租户隔离与召回状态/生效时间过滤。

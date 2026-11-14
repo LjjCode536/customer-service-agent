@@ -157,7 +157,12 @@ def record_trace(
         s.flush()
 
 
-def trace_step(trace, node, input_data, fn, skip_exceptions=()):
+def trace_step(trace, node, input_data, fn, skip_exceptions=(), output_map=None):
+    """Run one node, persist its Trace row, and return the untransformed output.
+
+    ``output_map`` lets a caller persist a customer-safe projection of the
+    output without changing what the workflow itself consumes.
+    """
     st = time.perf_counter()
     try:
         out = fn()
@@ -179,7 +184,7 @@ def trace_step(trace, node, input_data, fn, skip_exceptions=()):
         node,
         status='success',
         input_data=input_data,
-        output=out,
+        output=output_map(out) if output_map else out,
         latency_ms=int((time.perf_counter() - st) * 1000),
     )
     return out

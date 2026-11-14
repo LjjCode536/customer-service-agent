@@ -223,6 +223,7 @@ def test_archived_document_versions_are_not_recalled(rag_db):
 
 
 def test_bm25_route_ranks_exact_keyword_match(rag_db):
+    _add_distractors()
     set_provider(ZeroVectorProvider())
 
     evidence = retrieve('电子发票怎么开', top_n=1, ctx=CTX)
@@ -234,8 +235,9 @@ def test_bm25_route_ranks_exact_keyword_match(rag_db):
 
 def test_embedding_route_recalls_synonym_without_lexical_overlap(rag_db):
     _add_distractors()
+    staff = SecurityContext('A1001', 'TENANT-DEMO', 'agent')
 
-    evidence = retrieve('东西没送到', top_n=1, ctx=CTX)
+    evidence = retrieve('东西没送到', top_n=1, ctx=staff)
 
     assert evidence[0]['id'] == 'KB-LOGISTICS-V1'
     assert evidence[0]['bm25_score'] == 0
@@ -258,6 +260,7 @@ def test_rrf_score_is_the_sum_of_both_route_ranks(rag_db):
 
 
 def test_rrf_prefers_documents_recalled_by_both_routes(rag_db):
+    _add_distractors()
     _add_document_version(
         'KB-A-BOTH',
         title='退款 特殊关键词',

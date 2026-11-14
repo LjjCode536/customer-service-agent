@@ -38,6 +38,7 @@ from app.db.models import (
 from app.documents import lifecycle as document_lifecycle
 from app.documents import uploads as document_uploads
 from app.documents.catalog import (
+    DocumentAccessDenied,
     DocumentNotFound,
     get_document,
     get_version,
@@ -433,6 +434,8 @@ def restore_document(document_id: str, ctx: SecurityContextDep):
 def document_detail(document_id: str, ctx: SecurityContextDep):
     try:
         return get_document(ctx, document_id)
+    except DocumentAccessDenied as exc:
+        raise HTTPException(403, str(exc)) from exc
     except DocumentNotFound as exc:
         raise HTTPException(404, str(exc)) from exc
 
@@ -441,6 +444,8 @@ def document_detail(document_id: str, ctx: SecurityContextDep):
 def document_version(document_id: str, version_id: str, ctx: SecurityContextDep):
     try:
         return get_version(ctx, document_id, version_id)
+    except DocumentAccessDenied as exc:
+        raise HTTPException(403, str(exc)) from exc
     except DocumentNotFound as exc:
         raise HTTPException(404, str(exc)) from exc
 
@@ -451,6 +456,8 @@ def download_document_version(
 ):
     try:
         version, data = read_version_source(ctx, document_id, version_id)
+    except DocumentAccessDenied as exc:
+        raise HTTPException(403, str(exc)) from exc
     except DocumentNotFound as exc:
         raise HTTPException(404, str(exc)) from exc
     filename = (version.source_filename or f'{version.id}.txt').replace('"', '')

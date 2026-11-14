@@ -8,6 +8,7 @@ TENANT_HEADERS = {
     'X-Tenant-Id': 'TENANT-DEMO',
     'X-User-Role': 'customer',
 }
+AGENT_HEADERS = {**TENANT_HEADERS, 'X-User-Role': 'agent'}
 OTHER_TENANT_HEADERS = {**TENANT_HEADERS, 'X-Tenant-Id': 'TENANT-OTHER'}
 KNOWLEDGE_BY_ID = {row['id']: row for row in KNOWLEDGE}
 
@@ -28,16 +29,13 @@ def _get(path: str, **headers):
     return TestClient(app).get(path, headers={**TENANT_HEADERS, **headers})
 
 
-def test_document_list_returns_seed_documents_with_published_version(seeded_db):
+def test_document_list_returns_customer_visible_seed_documents(seeded_db):
     response = _get('/api/v1/documents')
 
     assert response.status_code == 200
     rows = {row['id']: row for row in response.json()}
-    assert set(rows) == {
-        'DOC-REFUND-ELECTRONICS',
-        'DOC-LOGISTICS-SOP',
-        'DOC-INVOICE',
-    }
+    # A customer never sees the staff_only logistics SOP.
+    assert set(rows) == {'DOC-REFUND-ELECTRONICS', 'DOC-INVOICE'}
 
     refund = rows['DOC-REFUND-ELECTRONICS']
     assert refund['title'] == '电子商品售后退款政策'
@@ -49,8 +47,20 @@ def test_document_list_returns_seed_documents_with_published_version(seeded_db):
     assert refund['published_version']['id'] == 'KB-REFUND-V3'
     assert refund['published_version']['label'] == '2026-v3'
 
-    assert rows['DOC-LOGISTICS-SOP']['published_version']['id'] == 'KB-LOGISTICS-V1'
     assert rows['DOC-INVOICE']['published_version']['id'] == 'KB-INVOICE-V1'
+
+
+def test_document_list_includes_staff_only_for_agent(seeded_db):
+    response = _get('/api/v1/documents', **AGENT_HEADERS)
+
+    assert response.status_code == 200
+    rows = {row['id']: row for row in response.json()}
+    assert set(rows) == {
+        'DOC-REFUND-ELECTRONICS',
+        'DOC-LOGISTICS-SOP',
+        'DOC-INVOICE',
+    }
+    assert rows['DOC-LOGISTICS-SOP']['published_version']['id'] == 'KB-LOGISTICS-V1'
 
 
 def test_document_detail_exposes_full_version_history(seeded_db):
@@ -83,9 +93,10 @@ def test_document_version_detail_returns_parsed_text(seeded_db):
     assert body['content_text'] == KNOWLEDGE_BY_ID['KB-INVOICE-V1']['content']
 
 
-def test_seed_source_file_can_be_downloaded(seeded_db):
+def test_seed_source_file_can_be_downloaded_by_staff(seeded_db):
     response = _get(
-        '/api/v1/documents/DOC-LOGISTICS-SOP/versions/KB-LOGISTICS-V1/download'
+        '/api/v1/documents/DOC-LOGISTICS-SOP/versions/KB-LOGISTICS-V1/download',
+        **AGENT_HEADERS,
     )
 
     assert response.status_code == 200
@@ -95,14 +106,15 @@ def test_seed_source_file_can_be_downloaded(seeded_db):
 
 
 def test_document_list_filters_apply_metadata_and_keyword(seeded_db):
-    def ids(query: str) -> set[str]:
-        response = _get(f'/api/v1/documents?{query}')
+    def ids(query: str, **headers) -> set[str]:
+        response = _get(f'/api/v1/documents?{query}', **headers)
         assert response.status_code == 200
         return {row['id'] for row in response.json()}
 
     assert ids('category=invoice') == {'DOC-INVOICE'}
     assert ids('product_type=electronics') == {'DOC-REFUND-ELECTRONICS'}
-    assert ids('visibility=staff_only') == {'DOC-LOGISTICS-SOP'}
+    assert ids('visibility=staff_only') == set()
+    assert ids('visibility=staff_only', **AGENT_HEADERS) == {'DOC-LOGISTICS-SOP'}
     assert ids('status=archived') == set()
     assert ids('keyword=发票') == {'DOC-INVOICE'}
     assert ids('keyword=二次销售') == {'DOC-REFUND-ELECTRONICS'}
@@ -145,8 +157,8 @@ def test_unknown_document_and_version_are_404(seeded_db):
     )
 
 
-def test_knowledge_read_model_is_built_from_published_versions(seeded_db):
-    response = _get('/api/v1/knowledge')
+def test_knowledge_read_model_includes_staff_only_for_agent(seeded_db):
+    response = _get('/api/v1/knowledge', **AGENT_HEADERS)
 
     assert response.status_code == 200
     rows = {row['id']: row for row in response.json()}

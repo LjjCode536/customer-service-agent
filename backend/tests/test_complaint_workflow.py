@@ -79,7 +79,11 @@ def test_vip_complaint_uses_dedicated_path_and_never_refunds(seeded_db):
     assert nodes & REFUND_ONLY_NODES == set()
 
     policy = next(step for step in steps if step['node'] == 'retrieve_policy')
-    assert '物流异常处理SOP' in {doc['title'] for doc in policy['output']['knowledge']}
+    knowledge = policy['output']['knowledge']
+    assert '物流异常处理SOP' in {doc['title'] for doc in knowledge}
+    # The service principal read the SOP body, but the customer-visible trace
+    # only keeps citation metadata.
+    assert all(set(doc) == {'title', 'version', 'rerank_score'} for doc in knowledge)
 
 
 def test_stale_logistics_participates_in_complaint_priority(seeded_db):

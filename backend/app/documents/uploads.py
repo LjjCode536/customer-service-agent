@@ -16,7 +16,7 @@ from uuid import uuid4
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.core.security import SecurityContext
+from app.core.security import USER_ROLES, VALID_VISIBILITIES, SecurityContext
 from app.db.database import session_scope, utcnow
 from app.db.models import Document, DocumentVersion
 from app.documents.catalog import DocumentNotFound, load_document
@@ -25,8 +25,6 @@ from app.documents.parsing import mime_type_for, validate_upload
 from app.documents.storage import StoredSource, store_bytes
 from app.services.tasking import record_audit
 
-VALID_VISIBILITIES = {'tenant', 'staff_only', 'restricted'}
-VALID_ROLES = {'customer', 'agent', 'manager'}
 MAX_TITLE_LENGTH = 255
 MAX_METADATA_LENGTH = 64
 
@@ -360,9 +358,9 @@ def _normalize_roles(raw: list[str] | None) -> list[str] | None:
             role = part.strip().lower()
             if role and role not in roles:
                 roles.append(role)
-    invalid = sorted(set(roles) - VALID_ROLES)
+    invalid = sorted(set(roles) - USER_ROLES)
     if invalid:
-        allowed = ', '.join(sorted(VALID_ROLES))
+        allowed = ', '.join(sorted(USER_ROLES))
         raise InvalidMetadata(f'allowed_roles must be within {allowed}.')
     return roles or None
 

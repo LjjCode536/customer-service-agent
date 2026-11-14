@@ -20,7 +20,7 @@
 - **Version Lifecycle（版本生命周期）**：`draft → processing → ready → published`；`published` 可被新版本替换为 `superseded`，也可人工下架为 `archived`；`archived` 可恢复为 `ready`；失败版本可重试。
 - **Rollback（回滚）**：重新发布旧的 `superseded` 版本，使其重新成为 Published Version，并把当前版本替换为 `superseded`。
 - **Archive（归档）**：版本级归档只停用单个已发布版本；文档级归档停用整个文档，版本状态保持不变，恢复文档后原 Published Version 重新具备召回资格。
-- **Visibility（可见性）**：文档的读取范围，分为 `tenant`（租户内全员）、`staff_only`（客服与管理员）、`restricted`（按 `allowed_roles` 显式授权）。
+- **Visibility（可见性）**：文档的读取范围，分为 `tenant`（租户内全员）、`staff_only`（仅 `agent / manager / service`）、`restricted`（按 `allowed_roles` 显式授权，`service` 始终可读）。跨租户读取一律 `404`，同租户但角色不可见返回 `403`。
 - **Ingestion（入库）**：把文档版本解析并转化为可检索知识的过程。
 
 ## 检索
@@ -34,8 +34,8 @@
 
 ## 安全与业务事实
 
-- **Security Context（安全上下文）**：由服务端从请求头解析出的 `user_id / tenant_id / role`，Tool 只能信任它，不能信任模型传入的身份字段。
-- **Service Principal（服务身份）**：Workflow 内部检索使用的非用户身份，仅限同租户的策略检索，不暴露给前端或客户可见输出。
+- **Security Context（安全上下文）**：由服务端从请求头解析出的 `user_id / tenant_id / role`，Tool 只能信任它，不能信任模型传入的身份字段。HTTP 只接受 `customer / agent / manager`，未知角色与 `service` 返回 `403`。
+- **Service Principal（服务身份）**：Workflow 内部检索使用的 `service` 角色，仅限任务租户内的策略检索，可读取 `staff_only` 与 `restricted` 文档；不能通过前端角色或请求头伪造，其检索正文不进入客户可见的 task result / trace。
 - **Tool Runtime（工具运行时）**：执行 Order / Logistics / Refund / Ticket 操作的边界层，负责归属校验、租户隔离与错误映射。
 - **Order Ownership（订单归属）**：订单的 `user_id` 与 `tenant_id` 必须与 Security Context 一致；客服角色可代查，客户不可越权。
 
@@ -68,7 +68,7 @@
 - **Task（任务）**：一次后台 Workflow 执行的持久化实体，具有状态、当前节点、结果与错误。
 - **Event Store（事件存储）**：节点事件的持久化记录；SSE 只读它，不驱动任务。
 - **Worker**：独立消费 Task 的进程；浏览器断开不影响任务执行。
-- **Trace（链路）**：一次任务内各节点的输入、输出、耗时与错误记录，可按 `trace_id` 回放。
+- **Trace（链路）**：一次任务内各节点的输入、输出、耗时与错误记录，可按 `trace_id` 回放；客户可见的 `retrieve_policy` 输出只保留引用元数据（标题、版本、分数），不保存 `staff_only` 正文。
 - **Audit（审计）**：对退款、审批等有副作用动作的不可变记录。
 
 ## Agent Loop 与评测

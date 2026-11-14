@@ -14,7 +14,7 @@ from app.core.config import settings
 from app.core.security import SecurityContext
 from app.db.database import use_session, utcnow
 from app.db.models import Document, DocumentVersion
-from app.documents.catalog import version_to_evidence
+from app.documents.catalog import document_is_visible, version_to_evidence
 from app.llm.provider import ModelProvider, ProviderError, get_provider
 
 RRF_K = 60
@@ -230,6 +230,8 @@ def _load_active_docs(
         ).all()
     docs = []
     for version, document in rows:
+        if not document_is_visible(ctx, document):
+            continue
         effective_from = parse_effective_from(version.effective_from)
         if effective_from is None or effective_from > now:
             continue

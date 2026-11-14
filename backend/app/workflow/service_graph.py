@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 
 from app.core.config import settings
 from app.core.context import scoped
-from app.core.security import SecurityContext
+from app.core.security import SecurityContext, service_context
 from app.db.database import dumps, session_scope, use_session
 from app.db.models import ApprovalRecord
 from app.llm.provider import get_provider
@@ -56,7 +56,9 @@ def _node_logistics(s): return {'logistics': get_logistics(s['order_id'], ctx(s)
 
 def _node_knowledge(s):
     category = 'logistics' if s['intent'] == 'complaint' else 'refund'
-    return {'knowledge': retrieve(s['message'], category=category, product_type=s.get('order', {}).get('product_type'), top_n=4, ctx=ctx(s))}
+    # Workflow policy recall runs as the internal service principal inside the
+    # task tenant, so staff_only SOPs are available without widening user access.
+    return {'knowledge': retrieve(s['message'], category=category, product_type=s.get('order', {}).get('product_type'), top_n=4, ctx=service_context(s['tenant_id']))}
 
 
 def _node_refunds(s): return {'refunds': get_refunds(s['order_id'], ctx(s))}
@@ -148,6 +150,18 @@ def _node_refund_ticket(s):
     return _create_ticket(s, category, s.get('eligibility', {}).get('reason', 'refund_review'))
 
 
+def _policy_citations(items):
+    """The only knowledge projection that may leave the Workflow."""
+    return [
+        {
+            'title': item.get('title'),
+            'version': item.get('version'),
+            'rerank_score': item.get('rerank_score'),
+        }
+        for item in items or []
+    ]
+
+
 def _node_answer(s):
     if s.get('review_decision') and not s['review_decision'].get('approved'):
         base = REJECTION_MESSAGE
@@ -159,7 +173,9 @@ def _node_answer(s):
         base = '该订单已经存在退款申请，为避免重复退款，本次不会再次创建退款。'
     else:
         base = '客服流程已完成。'
-    evidence = {'message': s['message'], 'order': s.get('order'), 'logistics': s.get('logistics'), 'complaint': s.get('complaint'), 'eligibility': s.get('eligibility'), 'risk': s.get('risk'), 'ticket': s.get('ticket'), 'refund': s.get('refund'), 'knowledge': [{'title': x['title'], 'content': x['content']} for x in s.get('knowledge', [])]}
+    # The generated answer is part of the customer-visible task result, so only
+    # policy metadata (never staff_only body text) is exposed to the model.
+    evidence = {'message': s['message'], 'order': s.get('order'), 'logistics': s.get('logistics'), 'complaint': s.get('complaint'), 'eligibility': s.get('eligibility'), 'risk': s.get('risk'), 'ticket': s.get('ticket'), 'refund': s.get('refund'), 'knowledge': _policy_citations(s.get('knowledge', []))}
     return {'answer': get_provider().chat('你是企业客服助手。只能解释系统已经完成的业务结果，不得改变退款结果、风险等级或工单优先级。', f'请用简洁自然的中文回复用户：{dumps(evidence)}', mock_response=base)}
 
 
@@ -205,9 +221,22 @@ def _trace_input(name, s):
     return data
 
 
+def _customer_safe_output(name, out):
+    """Project a node output before it is persisted or streamed to the customer."""
+    if name != 'retrieve_policy':
+        return out
+    # Workflow recall may use staff_only SOPs; Trace and node events keep only
+    # the citation metadata, never the retrieved body.
+    return {'knowledge': _policy_citations((out or {}).get('knowledge', []))}
+
+
 def run_node(name, s):
     trace_input = _trace_input(name, s)
     emit_event(s['task_id'], 'node_start', {'node': name})
+
+    def output_map(out):
+        return _customer_safe_output(name, out)
+
     if name == 'human_review':
         # interrupt() is control flow, not a failure: never record it as a failed trace.
         from langgraph.errors import GraphInterrupt
@@ -219,6 +248,7 @@ def run_node(name, s):
                 trace_input,
                 lambda: NODES[name](s),
                 skip_exceptions=(GraphInterrupt,),
+                output_map=output_map,
             )
         except GraphInterrupt:
             emit_event(s['task_id'], 'node_paused', {'node': name})
@@ -228,11 +258,21 @@ def run_node(name, s):
             raise
     else:
         try:
-            out = trace_step(s['trace_id'], name, trace_input, lambda: NODES[name](s))
+            out = trace_step(
+                s['trace_id'],
+                name,
+                trace_input,
+                lambda: NODES[name](s),
+                output_map=output_map,
+            )
         except Exception as exc:
             emit_event(s['task_id'], 'node_failed', {'node': name, 'error': str(exc)})
             raise
-    emit_event(s['task_id'], 'node_completed', {'node': name, 'output': out})
+    emit_event(
+        s['task_id'],
+        'node_completed',
+        {'node': name, 'output': _customer_safe_output(name, out)},
+    )
     return out
 
 
